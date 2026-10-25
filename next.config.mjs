@@ -6,7 +6,7 @@ const csp = [
   "style-src 'self' 'unsafe-inline'",
   'img-src \'self\' data: blob:',
   "font-src 'self' data:",
-  'connect-src \'self\' https://*.supabase.co https://servicodados.ibge.gov.br https://huggingface.co https://*.huggingface.co https://*.hf.co',
+  'connect-src \'self\' https://*.supabase.co https://servicodados.ibge.gov.br https://huggingface.co https://*.huggingface.co https://*.hf.co https://raw.githubusercontent.com',
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self'",

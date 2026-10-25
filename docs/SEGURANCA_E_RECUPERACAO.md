@@ -55,7 +55,7 @@ Semanal: ver logs. Mensal: revisar contas e admins. Trimestral: teste de restaur
 
 ## 8. IA local no navegador
 - As sugestões de colunas são heurísticas locais; não exigem chave de provedor e não enviam a planilha.
-- O chat usa WebLLM/WebGPU no dispositivo do usuário. O modelo é baixado do Hugging Face na primeira utilização e depende da compatibilidade do navegador, da GPU, da memória disponível e do espaço local. Usuários sem WebGPU ainda podem usar importação e gráficos, mas não o chat.
+- O chat usa WebLLM/WebGPU no dispositivo do usuário. Na primeira utilização, os pesos são baixados do Hugging Face e os arquivos do modelo vêm de `raw.githubusercontent.com`; a política CSP do app permite essas origens. O recurso depende da compatibilidade do navegador, da GPU, da memória disponível e do espaço local. Usuários sem WebGPU ainda podem usar importação e gráficos, mas não o chat.
 - O app consulta do Supabase somente os fatos agregados da série selecionada e limita o contexto a 3.000 fatos e até 36 períodos. Se houver mais dados, a resposta deve informar que a amostra é limitada.
 - A inferência ocorre no navegador, sem enviar perguntas nem fatos a uma API de IA. A página consulta os dados da conta no Supabase para mostrá-los e analisá-los; o download dos pesos do modelo é feito do Hugging Face.
 - Modelos locais pequenos podem produzir respostas imprecisas. Valide conclusões com os gráficos e dados originais; não use o chat como fonte única para decisões importantes.

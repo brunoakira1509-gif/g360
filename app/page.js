@@ -9,7 +9,12 @@ import LocalAiChat from '@/components/LocalAiChat';
 const HeatMap = dynamic(() => import('@/components/HeatMap'), { ssr: false });
 const fmt = n => Number(n).toLocaleString('pt-BR', { maximumFractionDigits: 2 });
 const num = v => typeof v === 'number' ? v : (s => Number(s.includes(',') ? s.replace(/[^\d,-]/g, '').replace(',', '.') : s.replace(/[^\d.-]/g, '')) || 0)(String(v));
-const pstr = v => v instanceof Date ? v.toISOString().slice(0, 7) : String(v).trim().slice(0, 40);
+const cleanPeriod = value => String(value ?? '')
+  .replace(/[^0-9A-Za-zÀ-ÿ _./:-]/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .slice(0, 40);
+const pstr = v => cleanPeriod(v instanceof Date ? v.toISOString().slice(0, 7) : v);
 const infer = rows => Object.keys(rows[0] || {}).map(n => {
   const v = rows.map(r => r[n]).filter(x => x !== '' && x != null);
   return { name: n, type: v.length && v.filter(x => typeof x === 'number').length / v.length > .8 ? 'number' : 'text', distinct: new Set(v).size };
@@ -19,10 +24,15 @@ function build(rows, m) {
   const g = new Map();
   rows.forEach(r => {
     const p = m.period ? pstr(r[m.period]) : m.label;
+    if (!p) throw new Error('Há períodos vazios ou inválidos na planilha. Confira a coluna de período ou informe um rótulo válido.');
     const d = [0, 1, 2].map(i => m.dims[i] ? String(r[m.dims[i]] ?? '').trim().slice(0, 120) : '');
     const k = [p, ...d].join('\u0001'); const a = g.get(k) || { p, d, value: 0, cnt: 0 };
     a.value += num(r[m.val]); a.cnt++; g.set(k, a);
   });
+  for (const { p, value } of g.values()) {
+    if (!Number.isFinite(value) || Math.abs(value) >= 1e15)
+      throw new Error(`O valor agregado do período "${p}" excede o limite permitido. Confira a coluna de valor.`);
+  }
   const out = new Map();
   g.forEach(a => { if (!out.has(a.p)) out.set(a.p, []); out.get(a.p).push({ d1: a.d[0], d2: a.d[1], d3: a.d[2], value: a.value, cnt: a.cnt }); });
   return out;
@@ -62,14 +72,16 @@ export default function Home() {
     const nd = sel ? sel.dims.length : f.dims.filter(Boolean).length;
     const dims = sel ? f.dims.slice(0, nd) : f.dims.filter(Boolean);
     if (!f.val || (!f.period && !f.label)) return setMsg('Escolha a coluna de valor e o período.');
+    if (!f.period && !cleanPeriod(f.label)) return setMsg('Informe um rótulo de período válido, com até 40 caracteres.');
     if (!sel && !f.name) return setMsg('Dê um nome para a série.');
     if (dims.length < nd || dims.some(d => !d)) return setMsg('Escolha as colunas de agrupamento.');
     if (dims.some(d => /cpf|cnpj|nome|e-?mail|telefone|celular|endere|\brg\b|titulo|cnh/i.test(d)) && !confirm('Uma coluna de agrupamento parece conter dado pessoal identificável. Para a LGPD, prefira agrupar por categoria ou região. Guardar mesmo assim?')) return;
     setBusy(true); setMsg('Guardando...');
     try {
+      const groups = build(file.rows, { period: f.period, label: cleanPeriod(f.label), dims, val: f.val });
       let s = sel;
       if (!s) { const { data, error } = await supabase.from('series').insert({ name: f.name, kind: f.kind, dims }).select().single(); if (error) throw error; s = data; }
-      const groups = build(file.rows, { period: f.period, label: f.label, dims, val: f.val }); let n = 0;
+      let n = 0;
       for (const [p, rows] of groups) { const { error } = await supabase.rpc('import_facts', { p_series: s.id, p_period: p, p_rows: rows }); if (error) throw error; n += rows.length; }
       await loadList(); await pick(s); setMsg(`Guardado: ${n} linhas agregadas a partir de ${file.rows.length} linhas da planilha. A planilha em si não é armazenada.`); setFile(null);
     } catch (e) { setMsg(e.message); }
@@ -104,20 +116,20 @@ export default function Home() {
         <option value="">Nova série</option>{list.map(l => <option key={l.id} value={l.id}>{l.name} ({l.kind})</option>)}</select></div>
       <p className="m">{sel ? 'Importe outro período para comparar com os dados existentes.' : 'Uma série reúne dados do mesmo assunto ao longo do tempo.'}</p>
       {sel && <button className="ghost danger-ghost" onClick={del}>Excluir esta série</button>}
-      <div className="upload-box"><label htmlFor="spreadsheet">1. Selecione uma planilha</label>
+      <div className="upload-box"><label htmlFor="spreadsheet">1. Envie sua planilha</label>
         <input id="spreadsheet" type="file" accept=".xlsx,.xls,.csv" onChange={readFile} disabled={busy}/>
         <span className="m">Excel ou CSV, até 25 MB. A planilha original não é guardada.</span>
         {file && <span className="file-summary">{file.rows.length.toLocaleString('pt-BR')} linhas e {file.cols.length} colunas lidas</span>}</div>
-      {file && <div className="import-config"><div className="section-heading"><div><p className="eyebrow">CONFIGURAÇÃO</p><h2>Como organizar os dados</h2></div>
+      {file && <div className="import-config"><div className="section-heading"><div><p className="eyebrow">PASSO 2</p><h2>Confira como organizar os dados</h2><p className="m">Escolha o valor, o período e, se quiser, até três agrupamentos.</p></div>
         <button className="secondary-button" disabled={busy} onClick={suggest}>Sugerir colunas automaticamente</button></div>
         {!sel && <div className="form-grid"><label>Nome da série<input placeholder="Ex.: despesas mensais" value={f.name} onChange={e => setF({ ...f, name: e.target.value })}/></label>
           <label>Categoria<select value={f.kind} onChange={e => setF({ ...f, kind: e.target.value })}><option value="valores">Valores</option><option value="despesas">Despesas</option><option value="votos">Votos</option><option value="outro">Outro</option></select></label></div>}
         <div className="form-grid"><label>Coluna de valor<Sel v={f.val} on={v => setF({ ...f, val: v })} opts={cols} ph="Selecione uma coluna"/></label>
-          <label>Coluna de período<Sel v={f.period} on={v => setF({ ...f, period: v })} opts={cols} ph="Selecione ou informe abaixo"/></label>
-          {!f.period && <label>Rótulo do período<input placeholder="Ex.: 2025-03" value={f.label} onChange={e => setF({ ...f, label: e.target.value })}/></label>}</div>
+          <label>Coluna que contém o período<Sel v={f.period} on={v => setF({ ...f, period: v })} opts={cols} ph="Selecione uma coluna"/></label>
+          {!f.period && <label>Período fixo para toda a planilha<input placeholder="Ex.: 2025-03" value={f.label} onChange={e => setF({ ...f, label: e.target.value })}/></label>}</div>
         <div className="form-grid">{[0, 1, 2].map(i => sel && i >= sel.dims.length ? null :
           <label key={i}>{sel ? `Coluna ${sel.dims[i]}` : `Agrupamento ${i + 1}${i ? ' (opcional)' : ''}`}<Sel v={f.dims[i]} on={v => setF({ ...f, dims: f.dims.map((d, j) => j === i ? v : d) })} opts={cols} ph="Sem agrupamento"/></label>)}</div>
-        <button disabled={busy} onClick={doImport}>{busy ? 'Aguarde...' : 'Guardar dados agregados'}</button>
+        <button disabled={busy} onClick={doImport}>{busy ? 'Guardando dados...' : '3. Guardar dados agregados'}</button>
       </div>}
       {msg && <p className="status-message" role="status">{msg}</p>}
     </section>

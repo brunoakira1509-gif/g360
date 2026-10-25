@@ -166,7 +166,7 @@ export default function LocalAiChat({ series }) {
   return <section className="card chart-card local-ai-card">
     <div className="section-heading"><div><p className="eyebrow">ASSISTENTE LOCAL</p><h2>Converse sobre esta série</h2></div>
       <button className="secondary-button" onClick={() => setOpen(value => !value)}>{open ? 'Fechar assistente' : 'Abrir assistente'}</button></div>
-    <p className="m">O modelo e a análise rodam no navegador. Os dados agregados são lidos do Supabase para este dispositivo e não são enviados a uma API de IA.</p>
+    <p className="m">A análise roda neste navegador. Na primeira utilização, o modelo precisa ser baixado (conexão e espaço disponíveis). Requer navegador e dispositivo compatíveis com WebGPU; os dados não são enviados a uma API de IA.</p>
     {open && <div className="local-ai-body">
       {supported === false && <p className="status-message" role="status">Este navegador não oferece WebGPU. Use uma versão atual do Chrome/Edge em um dispositivo compatível; as sugestões locais de colunas continuam disponíveis.</p>}
       {supported && !engineRef.current && <button disabled={loading} onClick={loadModel}>{loading ? 'Preparando modelo...' : 'Baixar e preparar modelo local'}</button>}
