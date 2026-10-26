@@ -1,8 +1,10 @@
 'use client';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase/client';
+import { verifyNumbers } from '@/lib/analyze';
+import { MODELS, ensureEngine, peekEngine, releaseEngine, hasWebGpu } from '@/lib/local-engine';
 
-const MODEL_ID = 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC';
+const QUICK_QUESTIONS = ['Resuma os principais pontos desta análise.', 'O que mais chama atenção nos dados?', 'Há algo que eu deva conferir antes de confiar nesses números?'];
 const MAX_FACT_ROWS = 3000;
 const MAX_HISTORY_MESSAGES = 8;
 const fmt = value => Number(value).toLocaleString('pt-BR', { maximumFractionDigits: 2 });
@@ -26,7 +28,10 @@ function summarizeFacts(facts, dimensions) {
   };
 }
 
-export default function LocalAiChat({ series }) {
+export default function LocalAiChat({ series, context: givenContext, title = 'Converse sobre esta série', modelId: modelProp, onModelChange }) {
+  const [modelLocal, setModelLocal] = useState(MODELS[0].id);
+  const modelId = modelProp ?? modelLocal, setModelId = onModelChange ?? setModelLocal;
+  const [ready, setReady] = useState(false);
   const engineRef = useRef(null);
   const mountedRef = useRef(false);
   const [open, setOpen] = useState(false);
@@ -37,56 +42,38 @@ export default function LocalAiChat({ series }) {
   const [question, setQuestion] = useState('');
   const [messages, setMessages] = useState([]);
   const contextRef = useRef(null);
-  const seriesId = series?.id;
+  const seriesId = series?.id ?? 'quick';
   const dims = useMemo(() => (series?.dims || []).slice(0, 3), [series?.dims]);
+  const quick = !!givenContext;
 
   useEffect(() => {
-    setSupported(typeof navigator !== 'undefined' && !!navigator.gpu);
+    setSupported(hasWebGpu());
   }, []);
+
+  useEffect(() => { setReady(!!peekEngine(modelId)); }, [modelId]);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      const engine = engineRef.current;
-      engineRef.current = null;
-      if (engine) {
-        engine.unload().then(
-          () => engine.worker?.terminate?.(),
-          error => {
-            console.error('Local AI engine cleanup failed:', error);
-            engine.worker?.terminate?.();
-          },
-        );
-      }
+      // Modo "Análise rápida": o motor é compartilhado com a página e ela mesma o libera.
+      if (!quick) releaseEngine();
     };
   }, [seriesId]);
 
   async function loadModel() {
-    if (engineRef.current || loading) return;
-    if (!navigator.gpu) {
-      setSupported(false);
-      return;
-    }
+    if (!hasWebGpu()) { setSupported(false); return null; }
+    const loaded = peekEngine(modelId);
+    if (loaded) { engineRef.current = loaded; setReady(true); return loaded; }
+    if (loading) return null;
     setLoading(true);
     setStatus('Baixando e preparando o modelo local. Na primeira vez pode levar alguns minutos e usar bastante espaço.');
-    let worker;
     try {
-      const { CreateWebWorkerMLCEngine } = await import('@mlc-ai/web-llm');
-      worker = new Worker(new URL('../lib/local-llm.worker.js', import.meta.url), { type: 'module' });
-      const engine = await CreateWebWorkerMLCEngine(worker, MODEL_ID, {
-        initProgressCallback: progress => setStatus(progress.text || 'Preparando o modelo local...'),
-      });
-      if (!mountedRef.current) {
-        await engine.unload();
-        worker.terminate();
-        return null;
-      }
+      const engine = await ensureEngine(modelId, text => mountedRef.current && setStatus(text));
       engineRef.current = engine;
-      setStatus('Modelo pronto neste dispositivo.');
+      if (mountedRef.current) { setReady(true); setStatus('Modelo pronto neste dispositivo.'); }
       return engine;
     } catch (error) {
-      worker?.terminate();
       setStatus(`Não foi possível iniciar o modelo local: ${error.message || 'verifique o suporte WebGPU e a memória do dispositivo.'}`);
       return null;
     } finally {
@@ -95,6 +82,7 @@ export default function LocalAiChat({ series }) {
   }
 
   async function getContext() {
+    if (quick) return givenContext;
     if (contextRef.current) return contextRef.current;
     setStatus('Carregando os dados agregados desta série no navegador...');
     const { count, error: countError } = await supabase
@@ -124,36 +112,38 @@ export default function LocalAiChat({ series }) {
     return contextRef.current;
   }
 
-  async function ask(e) {
-    e.preventDefault();
-    const text = question.trim();
+  async function ask(e, preset) {
+    e?.preventDefault?.();
+    const text = (preset || question).trim();
     if (!text || sending) return;
     setQuestion('');
     setSending(true);
     setMessages(current => [...current, { role: 'user', content: text }]);
     try {
-      const engine = engineRef.current || await loadModel();
+      const engine = await loadModel();
       if (!engine) throw new Error('O modelo local não conseguiu iniciar. Verifique WebGPU, memória disponível e conexão para baixar o modelo.');
       const context = await getContext();
       setStatus('Analisando no seu dispositivo...');
       const conversation = [
         {
           role: 'system',
-          content: `Você é um assistente de análise de dados em português do Brasil. Responda somente com base no resumo agregado fornecido; não invente nem afirme causalidade. Se o resumo não tiver detalhe suficiente, diga isso. O contexto contém dados de uma série do usuário, sem linhas originais da planilha. ${
-            context.truncated ? `ATENÇÃO: o resumo foi calculado sobre ${context.loadedRows} de ${context.totalRows} linhas agregadas; informe essa limitação quando relevante.` : ''
-          }\nResumo: ${JSON.stringify(context)}`,
+          content: `Você é um assistente de análise de dados em português do Brasil. Os números abaixo JÁ foram calculados e conferidos por código. Regras: (1) cite os números exatamente como aparecem; (2) não faça contas novas nem estime valores; (3) não afirme causas, apenas descreva o que os dados mostram; (4) se a resposta não estiver nos dados, diga que não consegue responder com o que foi calculado; (5) seja curto e direto. ${
+            context.truncated ? `ATENÇÃO: o resumo cobre ${context.loadedRows} de ${context.totalRows} linhas agregadas; informe essa limitação quando relevante.` : ''
+          }\nDADOS: ${JSON.stringify(context)}`,
         },
-        ...messages.slice(-MAX_HISTORY_MESSAGES),
+        ...messages.filter(m => !m.warning).slice(-MAX_HISTORY_MESSAGES).map(({ role, content }) => ({ role, content })),
         { role: 'user', content: text },
       ];
       const response = await engine.chat.completions.create({
         messages: conversation,
-        temperature: 0.2,
+        temperature: 0.1,
         max_tokens: 400,
       });
       const answer = response.choices?.[0]?.message?.content;
       if (!answer) throw new Error('O modelo não produziu resposta. Tente reformular a pergunta.');
-      setMessages(current => [...current, { role: 'assistant', content: answer }]);
+      const unverified = verifyNumbers(answer, context);
+      setMessages(current => [...current, { role: 'assistant', content: answer,
+        warning: unverified.length ? `Conferência automática: ${unverified.join(', ')} não aparece(m) nos dados calculados. Confira nos gráficos antes de usar.` : '' }]);
       setStatus('A análise foi executada localmente neste dispositivo.');
     } catch (error) {
       setMessages(current => [...current, { role: 'assistant', content: `Não consegui analisar agora: ${error.message}` }]);
@@ -164,17 +154,19 @@ export default function LocalAiChat({ series }) {
   }
 
   return <section className="card chart-card local-ai-card">
-    <div className="section-heading"><div><p className="eyebrow">ASSISTENTE LOCAL</p><h2>Converse sobre esta série</h2></div>
+    <div className="section-heading"><div><p className="eyebrow">ASSISTENTE LOCAL</p><h2>{title}</h2></div>
       <button className="secondary-button" onClick={() => setOpen(value => !value)}>{open ? 'Fechar assistente' : 'Abrir assistente'}</button></div>
     <p className="m">A análise roda neste navegador. Na primeira utilização, o modelo precisa ser baixado (conexão e espaço disponíveis). Requer navegador e dispositivo compatíveis com WebGPU; os dados não são enviados a uma API de IA.</p>
     {open && <div className="local-ai-body">
       {supported === false && <p className="status-message" role="status">Este navegador não oferece WebGPU. Use uma versão atual do Chrome/Edge em um dispositivo compatível; as sugestões locais de colunas continuam disponíveis.</p>}
-      {supported && !engineRef.current && <button disabled={loading} onClick={loadModel}>{loading ? 'Preparando modelo...' : 'Baixar e preparar modelo local'}</button>}
+      {supported && !ready && <label className="model-pick">Modelo<select value={modelId} disabled={loading} onChange={e => setModelId(e.target.value)}>{MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}</select></label>}
+      {supported && !ready && <button disabled={loading} onClick={loadModel}>{loading ? 'Preparando modelo...' : 'Baixar e preparar modelo local'}</button>}
       {status && <p className="m" role="status">{status}</p>}
       {supported && <><div className="chat-transcript" aria-live="polite">
         {messages.map((message, index) => <div className={`chat-message ${message.role}`} key={`${message.role}-${index}`}>
-          <b>{message.role === 'user' ? 'Você' : 'Assistente'}</b><p>{message.content}</p></div>)}
-        {!messages.length && <p className="m">Exemplos: “Qual período teve o maior total?” ou “Quais categorias mais cresceram?”</p>}
+          <b>{message.role === 'user' ? 'Você' : 'Assistente'}</b><p>{message.content}</p>
+          {message.warning && <p className="verify-warning" role="alert">⚠ {message.warning}</p>}</div>)}
+        {!messages.length && <div className="quick-questions"><p className="m">Sugestões:</p>{QUICK_QUESTIONS.map(q => <button type="button" className="ghost" key={q} disabled={sending || loading} onClick={e => ask(e, q)}>{q}</button>)}</div>}
       </div>
       <form className="chat-form" onSubmit={ask}>
         <label htmlFor="local-ai-question">Sua pergunta</label>

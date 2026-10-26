@@ -27,3 +27,7 @@
 
 ## Migrations
 Para uma instalação nova, rode em ordem no SQL Editor: `supabase/migrations/0001_base.sql`, `0002_hardening.sql` e `0003_require_aal2_profiles.sql`. A migration 0001 contém comandos `DROP TABLE ... CASCADE`: revise e faça backup antes de executá-la em um projeto com dados. Não reaplique migrations já executadas; use uma nova migration para mudanças futuras. Desfazer: `supabase/rollback/` (rollback pode remover controles de segurança). Plano completo: `docs/SEGURANCA_E_RECUPERACAO.md`.
+
+### Seleção de colunas: duas opções
+- **Sugerir automaticamente** (regras): olha o conteúdo e o nome das colunas. Instantâneo, funciona em qualquer navegador.
+- **✨ Escolher com IA** (opcional, WebGPU): o modelo local escolhe entre as colunas existentes (resposta restrita por schema). Tudo é validado: colunas inexistentes, códigos/IDs e dados pessoais são recusados e substituídos pelas regras. Código em `lib/ai-select.js`; o motor da IA é compartilhado com o chat (`lib/local-engine.js`).

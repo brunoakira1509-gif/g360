@@ -5,29 +5,22 @@ import * as XLSX from 'xlsx';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { supabase } from '@/lib/supabase/client';
 import { suggestColumns } from '@/lib/suggest-columns';
+import { readSpreadsheet, inferColumns, parseNumber, toPeriod } from '@/lib/sheet';
 import LocalAiChat from '@/components/LocalAiChat';
 const HeatMap = dynamic(() => import('@/components/HeatMap'), { ssr: false });
 const fmt = n => Number(n).toLocaleString('pt-BR', { maximumFractionDigits: 2 });
-const num = v => typeof v === 'number' ? v : (s => Number(s.includes(',') ? s.replace(/[^\d,-]/g, '').replace(',', '.') : s.replace(/[^\d.-]/g, '')) || 0)(String(v));
-const cleanPeriod = value => String(value ?? '')
-  .replace(/[^0-9A-Za-zÀ-ÿ _./:-]/g, ' ')
-  .replace(/\s+/g, ' ')
-  .trim()
-  .slice(0, 40);
-const pstr = v => cleanPeriod(v instanceof Date ? v.toISOString().slice(0, 7) : v);
-const infer = rows => Object.keys(rows[0] || {}).map(n => {
-  const v = rows.map(r => r[n]).filter(x => x !== '' && x != null);
-  return { name: n, type: v.length && v.filter(x => typeof x === 'number').length / v.length > .8 ? 'number' : 'text', distinct: new Set(v).size };
-});
+const cleanPeriod = toPeriod;
 // Agrega no navegador: milhares de linhas viram poucas linhas (período + dimensões + soma)
-function build(rows, m) {
+function build(rows, m, stats = { skipped: 0 }) {
   const g = new Map();
   rows.forEach(r => {
-    const p = m.period ? pstr(r[m.period]) : m.label;
+    const p = m.period ? toPeriod(r[m.period]) : m.label;
     if (!p) throw new Error('Há períodos vazios ou inválidos na planilha. Confira a coluna de período ou informe um rótulo válido.');
     const d = [0, 1, 2].map(i => m.dims[i] ? String(r[m.dims[i]] ?? '').trim().slice(0, 120) : '');
     const k = [p, ...d].join('\u0001'); const a = g.get(k) || { p, d, value: 0, cnt: 0 };
-    a.value += num(r[m.val]); a.cnt++; g.set(k, a);
+    const n = parseNumber(r[m.val]);
+    if (n == null) { if (String(r[m.val] ?? '').trim() !== '') stats.skipped++; return; }
+    a.value += n; a.cnt++; g.set(k, a);
   });
   for (const { p, value } of g.values()) {
     if (!Number.isFinite(value) || Math.abs(value) >= 1e15)
@@ -56,11 +49,14 @@ export default function Home() {
   async function readFile(e) {
     const x = e.target.files[0]; if (!x) return;
     if (x.size > 25e6) return setMsg('Arquivo maior que 25 MB.');
-    const wb = XLSX.read(await x.arrayBuffer(), { cellDates: true });
-    const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
-    if (!rows.length) return setMsg('Planilha vazia.');
-    const cols = infer(rows); setFile({ rows, cols });
-    setF(v => ({ ...v, val: cols.find(c => c.type === 'number')?.name || '' })); setMsg('');
+    try {
+      const { tables } = readSpreadsheet(XLSX, await x.arrayBuffer(), x.name);
+      const t = tables[0]; if (!t?.rows.length) return setMsg('Planilha vazia.');
+      const rows = t.rows.map(r => Object.fromEntries(t.headers.map((h, i) => [h, r[i]])));
+      const cols = inferColumns(t); setFile({ rows, cols });
+      setF(v => ({ ...v, val: cols.find(c => c.type === 'number')?.name || '' }));
+      setMsg(tables.length > 1 ? `A planilha tem ${tables.length} abas; foi lida a primeira ("${t.name}"). Use a Análise rápida para escolher a aba.` : '');
+    } catch (err) { setMsg(err.message || 'Não foi possível ler o arquivo.'); }
   }
   async function suggest() {
     if (!file?.cols?.length) return setMsg('Carregue uma planilha antes de pedir uma sugestão.');
@@ -78,12 +74,13 @@ export default function Home() {
     if (dims.some(d => /cpf|cnpj|nome|e-?mail|telefone|celular|endere|\brg\b|titulo|cnh/i.test(d)) && !confirm('Uma coluna de agrupamento parece conter dado pessoal identificável. Para a LGPD, prefira agrupar por categoria ou região. Guardar mesmo assim?')) return;
     setBusy(true); setMsg('Guardando...');
     try {
-      const groups = build(file.rows, { period: f.period, label: cleanPeriod(f.label), dims, val: f.val });
+      const st = { skipped: 0 };
+      const groups = build(file.rows, { period: f.period, label: cleanPeriod(f.label), dims, val: f.val }, st);
       let s = sel;
       if (!s) { const { data, error } = await supabase.from('series').insert({ name: f.name, kind: f.kind, dims }).select().single(); if (error) throw error; s = data; }
       let n = 0;
       for (const [p, rows] of groups) { const { error } = await supabase.rpc('import_facts', { p_series: s.id, p_period: p, p_rows: rows }); if (error) throw error; n += rows.length; }
-      await loadList(); await pick(s); setMsg(`Guardado: ${n} linhas agregadas a partir de ${file.rows.length} linhas da planilha. A planilha em si não é armazenada.`); setFile(null);
+      await loadList(); await pick(s); setMsg(`Guardado: ${n} linhas agregadas a partir de ${file.rows.length} linhas da planilha. A planilha em si não é armazenada.${st.skipped ? ` Atenção: ${st.skipped} valor(es) não numérico(s) foram ignorados.` : ''}`); setFile(null);
     } catch (e) { setMsg(e.message); }
     setBusy(false);
   }
@@ -106,7 +103,7 @@ export default function Home() {
   const cols = file?.cols.map(c => c.name) || [], periods = tot.map(t => t.period);
   const tip = { contentStyle: { background: '#161a31', border: '1px solid #2c3256' } };
   return <><header className="app-header"><a className="brand" href="/">Painel <span>G360</span></a><nav className="header-actions">
-    {role === 'admin' && <a href="/admin">Administração</a>}<a href="/privacidade">Privacidade</a>
+    <a href="/analise">Análise rápida</a>{role === 'admin' && <a href="/admin">Administração</a>}<a href="/privacidade">Privacidade</a>
     <button className="ghost" onClick={exportar}>Baixar dados</button><button className="ghost danger-ghost" onClick={apagar}>Excluir conta</button>
     <button className="ghost" onClick={async () => { await supabase.auth.signOut(); location.href = '/login'; }}>Sair</button></nav></header>
     <main className="dashboard">
@@ -143,7 +140,7 @@ export default function Home() {
       <label>Período inicial<select value={ab.a} onChange={e => setAb({ ...ab, a: e.target.value })}>{periods.map(p => <option key={p}>{p}</option>)}</select></label>
       <label>Período final<select value={ab.b} onChange={e => setAb({ ...ab, b: e.target.value })}>{periods.map(p => <option key={p}>{p}</option>)}</select></label>
       {sel.dims.length > 0 && <label>Agrupar por<select value={ab.dim} onChange={e => setAb({ ...ab, dim: +e.target.value })}>{sel.dims.map((d, i) => <option key={d} value={i + 1}>{d}</option>)}</select></label>}</div>
-      {sel.dims.length > 0 && <div className="chart-area comparison-chart"><ResponsiveContainer><BarChart data={top}><CartesianGrid stroke="#2c3256"/><XAxis dataKey="k" stroke="#8d93bd" fontSize={11}/>
+      {sel.dims.length > 0 && <div className="chart-area comparison-chart"><ResponsiveContainer><BarChart data={top}><CartesianGrid stroke="#2c3256"/><XAxis dataKey="k" stroke="#8d93bd" fontSize={11} interval={0} angle={-30} textAnchor="end" height={70} tickFormatter={v => String(v).length > 14 ? String(v).slice(0, 13) + '…' : v}/>
         <YAxis stroke="#8d93bd" fontSize={11} tickFormatter={fmt}/><Tooltip {...tip} formatter={fmt}/><Legend/>
         <Bar dataKey="a" name={ab.a} fill="#7c6cff" radius={[4, 4, 0, 0]}/><Bar dataKey="b" name={ab.b} fill="#2dd4bf" radius={[4, 4, 0, 0]}/></BarChart></ResponsiveContainer></div>}
       {sel.dims.length > 0 && <div className="table-wrap"><table><thead><tr><th>{sel.dims[ab.dim - 1]}</th><th>{ab.a}</th><th>{ab.b}</th><th>Diferença</th><th>Variação</th></tr></thead><tbody>
