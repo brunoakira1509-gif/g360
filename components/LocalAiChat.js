@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase/client';
 import { verifyNumbers } from '@/lib/analyze';
+import { comparePeriods } from '@/lib/sheet';
 import { MODELS, ensureEngine, peekEngine, releaseEngine, checkWebGpu } from '@/lib/local-engine';
 
 const QUICK_QUESTIONS = ['Resuma os principais pontos desta análise.', 'O que mais chama atenção nos dados?', 'Há algo que eu deva conferir antes de confiar nesses números?'];
@@ -20,7 +21,7 @@ function summarizeFacts(facts, dimensions) {
     });
   }
   return {
-    periods: [...byPeriod].map(([period, total]) => ({ period, total })).sort((a, b) => a.period.localeCompare(b.period)).slice(-36),
+    periods: [...byPeriod].map(([period, total]) => ({ period, total })).sort((a, b) => comparePeriods(a.period, b.period)).slice(-36),
     dimensions: dimensions.map((name, index) => ({
       name,
       top: [...byDimension[index]].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([label, total]) => ({ label, total })),

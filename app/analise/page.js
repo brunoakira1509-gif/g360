@@ -1,17 +1,17 @@
 'use client';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { ResponsiveContainer, LineChart, Line, BarChart, Bar, AreaChart, Area, PieChart, Pie, Cell, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from 'recharts';
+import { ResponsiveContainer, LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
 import AppHeader from '@/components/AppHeader';
 import LocalAiChat from '@/components/LocalAiChat';
-import { readSpreadsheet, inferColumns } from '@/lib/sheet';
+import { readSpreadsheet, inferColumns, splitSummaryRows, periodLabel } from '@/lib/sheet';
 import { MODELS, ensureEngine, releaseEngine, checkWebGpu } from '@/lib/local-engine';
 import { aiSuggest } from '@/lib/ai-select';
 import { analyze, suggest, qualityWarnings, numericStats, fmt, AGG } from '@/lib/analyze';
+import { C, tooltipProps, axisProps, compact } from '@/lib/chart-theme';
 
-const COLORS = ['#2dd4bf', '#7c6cff', '#f472b6', '#f59e0b', '#38bdf8', '#a3e635', '#fb7185', '#c084fc', '#facc15', '#34d399', '#60a5fa', '#f97316'];
-const tip = { contentStyle: { background: '#161a31', border: '1px solid #2c3256', borderRadius: 8 } };
 const MAX_BYTES = 25e6;
+const MAX_BARS = 12;
 const short = (s, n = 18) => String(s).length > n ? String(s).slice(0, n - 1) + '…' : String(s);
 const TYPE_LABEL = { number: 'número', date: 'data', text: 'texto' };
 
@@ -23,23 +23,41 @@ const Pick = ({ label, value, onChange, cols, none, hint }) => <label>{label}
   <select value={value} onChange={e => onChange(e.target.value)}>{none && <option value="">{none}</option>}{cols.map(c => <option key={c.name} value={c.name}>{c.name} ({TYPE_LABEL[c.type]})</option>)}</select>
   {hint && <small>{hint}</small>}</label>;
 
+// Uma frase que responde "o que aconteceu?" antes de qualquer gráfico
+function Headline({ h }) {
+  if (!h) return null;
+  const up = h.variacao != null && h.variacao >= 0;
+  return <p className="headline">
+    {h.periodo
+      ? <>Em <b>{h.periodo}</b>, {h.metrica}: <b>{fmt(h.valor)}</b>.{h.variacao != null && <> Isso é <b className="delta">{up ? 'uma alta' : 'uma queda'} de {fmt(Math.abs(h.variacao))}%</b> em relação a {h.anterior}.</>}</>
+      : <>{h.lider} lidera: {h.metrica} de <b>{fmt(h.valor)}</b>.</>}
+  </p>;
+}
+
 export default function Analise() {
   const [book, setBook] = useState(null);           // { fileName, tables }
   const [ti, setTi] = useState(0);
+  const [keepTotals, setKeepTotals] = useState(false);
   const [map, setMap] = useState({ value: '', period: '', dim: '', agg: 'sum' });
-  const [timeChart, setTimeChart] = useState('line'), [dimChart, setDimChart] = useState('bar');
+  const [timeChart, setTimeChart] = useState('bar');
   const [msg, setMsg] = useState(''), [busy, setBusy] = useState(false), [drag, setDrag] = useState(false);
   const input = useRef();
   const [modelId, setModelId] = useState(MODELS[0].id), [gpu, setGpu] = useState(null);
   const [aiBusy, setAiBusy] = useState(false), [aiStatus, setAiStatus] = useState(''), [aiNote, setAiNote] = useState(null);
   useEffect(() => { checkWebGpu().then(setGpu); return () => { releaseEngine(); }; }, []);
 
-  const table = book?.tables[ti];
+  // Linhas "Total"/"Subtotal" saem da conta por padrão: se ficassem, tudo seria contado em dobro.
+  const rawTable = book?.tables[ti];
+  const split = useMemo(() => rawTable ? splitSummaryRows(rawTable) : null, [rawTable]);
+  const table = keepTotals ? rawTable : split?.table;
+  const removed = split?.removed.length || 0;
+
   const cols = useMemo(() => table ? inferColumns(table) : [], [table]);
   const numCols = cols.filter(c => c.type === 'number');
+  const valueCol = cols.find(c => c.name === map.value);
   const result = useMemo(() => table ? analyze(table, cols, map) : null, [table, cols, map]);
-  const warnings = useMemo(() => table ? qualityWarnings(table, cols, cols.find(c => c.name === map.value)) : [], [table, cols, map.value]);
-  const stats = useMemo(() => table && map.value ? numericStats(table, cols.find(c => c.name === map.value)?.index) : null, [table, cols, map.value]);
+  const warnings = useMemo(() => table ? qualityWarnings(table, cols, valueCol) : [], [table, cols, valueCol]);
+  const stats = useMemo(() => table && valueCol ? numericStats(table, valueCol.index) : null, [table, valueCol]);
   const aiContext = useMemo(() => {
     if (!result) return null;
     const periods = result.facts.periodos || [];
@@ -74,97 +92,119 @@ export default function Analise() {
     try {
       const { tables } = readSpreadsheet(XLSX, await file.arrayBuffer(), file.name);
       if (!tables.length) throw new Error('Não encontrei dados nesta planilha. Confira se há um cabeçalho e linhas preenchidas.');
-      setBook({ fileName: file.name, tables }); setTi(0); choose(tables[0]);
-      setMsg(`${file.name}: ${tables[0].rows.length.toLocaleString('pt-BR')} linhas lidas. As colunas foram sugeridas automaticamente; ajuste se precisar.`);
+      setBook({ fileName: file.name, tables }); setTi(0); setKeepTotals(false); choose(splitSummaryRows(tables[0]).table);
+      setMsg(`${file.name}: ${tables[0].rows.length.toLocaleString('pt-BR')} linhas lidas.`);
     } catch (e) { setBook(null); setMsg(e.message || 'Não foi possível ler este arquivo.'); }
     setBusy(false);
   }
+  function changeTable(i) { setTi(i); setKeepTotals(false); choose(splitSummaryRows(book.tables[i]).table); }
+  function toggleTotals(v) { setKeepTotals(v); choose(v ? rawTable : split.table); }
   function download() {
-    const q = v => `"${String(v).replace(/"/g, '""')}"`;
-    const lines = [['tipo', 'item', 'valor'].join(';')];
-    result.series.forEach(r => lines.push(['periodo', q(r.k), String(r.v).replace('.', ',')].join(';')));
-    result.byDim.forEach(r => lines.push(['categoria', q(r.k), String(r.v).replace('.', ',')].join(';')));
+    const q = v => `"${String(v).replace(/"/g, '""')}"`, num = v => String(v).replace('.', ',');
+    const lines = [['tipo', 'item', 'valor', 'registros'].join(';')];
+    result.series.forEach(r => lines.push(['periodo', q(r.k), num(r.v), r.n].join(';')));
+    result.byDim.forEach(r => lines.push(['categoria', q(r.k), num(r.v), r.n].join(';')));
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8' })); a.download = 'resumo-analise.csv'; a.click();
   }
 
   const label = `${AGG[map.agg]}${map.value && map.agg !== 'count' ? ' de ' + map.value : ' de registros'}`;
-  const topDim = result?.byDim.slice(0, 12) || [];
   const hasTime = result?.series.length > 1, hasDim = result?.byDim.length > 0;
+  const additive = map.agg === 'sum' || map.agg === 'count';
+  const dimTotal = result?.byDim.reduce((a, b) => a + b.v, 0) || 0;
+  const share = v => additive && dimTotal > 0 ? `${fmt(v / dimTotal * 100)}%` : '-';
+  // As maiores categorias + uma barra "Outras" quando a soma faz sentido; assim o gráfico fecha com o total.
+  const topDim = useMemo(() => {
+    if (!result) return [];
+    const d = result.byDim, head = d.slice(0, MAX_BARS);
+    if (d.length > MAX_BARS && additive) head.push({ k: `Outras ${d.length - MAX_BARS}`, v: d.slice(MAX_BARS).reduce((a, b) => a + b.v, 0), rest: true });
+    return head;
+  }, [result, additive]);
+  const timeData = useMemo(() => (result?.series || []).map(s => ({ ...s, label: periodLabel(s.k) })), [result]);
+  const sameCol = map.period && map.period === map.dim;
 
   return <><AppHeader active="analise"/>
     <main className="dashboard">
-      <section className="page-intro"><p className="eyebrow">ANÁLISE DE PLANILHA</p><h1>Entenda seus dados</h1>
-        <p className="m">1. Envie uma planilha. 2. Confira as colunas. 3. Veja os destaques e converse com a IA local. A planilha não sai do seu navegador.</p></section>
+      <section className="page-intro"><h1>Analisar planilha</h1>
+        <p className="m">Envie um arquivo e veja o que mudou, quem lidera e o que merece conferência. A planilha não sai do seu navegador.</p></section>
 
       <section className="card">
-        <div className={`dropzone${drag ? ' over' : ''}`} onDragOver={e => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)}
+        <div className={`dropzone${drag ? ' over' : ''}${book ? ' loaded' : ''}`} onDragOver={e => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)}
           onDrop={e => { e.preventDefault(); setDrag(false); load(e.dataTransfer.files[0]); }}>
-          <p><b>{book ? book.fileName : 'Arraste a planilha aqui'}</b></p>
-          <p className="m">Excel (.xlsx, .xls) ou CSV, até 25 MB</p>
-          <button type="button" disabled={busy} onClick={() => input.current.click()}>{book ? 'Trocar arquivo' : 'Escolher arquivo'}</button>
+          <div><p><b>{book ? book.fileName : 'Arraste a planilha aqui'}</b></p>
+            <p className="m">{book ? `${(table?.rows.length ?? 0).toLocaleString('pt-BR')} linhas · ${cols.length} colunas` : 'Excel (.xlsx, .xls) ou CSV, até 25 MB'}</p></div>
+          <button type="button" className={book ? 'secondary-button' : ''} disabled={busy} onClick={() => input.current.click()}>{book ? 'Trocar arquivo' : 'Escolher arquivo'}</button>
           <input ref={input} type="file" hidden accept=".xlsx,.xls,.csv,.tsv,.txt" onChange={e => { load(e.target.files[0]); e.target.value = ''; }}/>
         </div>
-        {msg && <p className="status-message" role="status">{msg}</p>}
+        {msg && !book && <p className="status-message" role="status">{msg}</p>}
       </section>
 
       {table && <>
-        <section className="card">
-          <div className="section-heading"><div><p className="eyebrow">PASSO 2</p><h2>O que analisar</h2></div>
+        {removed > 0 && <section className="notice" role="status">
+          <p><b>{removed} linha{removed > 1 ? 's' : ''} de total {keepTotals ? 'incluída' + (removed > 1 ? 's' : '') : 'ignorada' + (removed > 1 ? 's' : '')}.</b> {keepTotals ? 'Os números abaixo estão contando o total junto com os dados, ou seja, em dobro.' : 'Linhas como "Total" e "Subtotal" já resumem as outras; contá-las duplicaria os valores.'}</p>
+          <label className="check"><input type="checkbox" checked={keepTotals} onChange={e => toggleTotals(e.target.checked)}/> Incluir mesmo assim</label></section>}
+
+        <section className="card setup">
+          <div className="section-heading"><h2>O que analisar</h2>
             <div className="btn-row"><button className="secondary-button" disabled={aiBusy} onClick={() => choose(table)}>Sugerir automaticamente</button>
-              <button disabled={aiBusy || gpu === false} onClick={pickWithAi} title={gpu === false ? 'Este navegador não tem WebGPU' : ''}>{aiBusy ? 'IA trabalhando...' : '✨ Escolher com IA'}</button></div></div>
-          {gpu === false && <p className="m small">Este dispositivo não disponibilizou WebGPU. O resumo automático continua funcionando; para conversar com a IA local, tente Chrome ou Edge atualizados em um dispositivo compatível.</p>}
-          {gpu && <label className="model-pick">Modelo da IA<select value={modelId} disabled={aiBusy} onChange={e => setModelId(e.target.value)}>{MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}</select></label>}
+              <button className="secondary-button" disabled={aiBusy || gpu === false} onClick={pickWithAi} title={gpu === false ? 'Este navegador não tem WebGPU' : ''}>{aiBusy ? 'IA trabalhando...' : 'Escolher com IA'}</button></div></div>
           {aiStatus && <p className="status-message" role="status">{aiStatus}</p>}
           {aiNote?.error && <p className="status-message" role="alert">{aiNote.error}</p>}
-          {aiNote && !aiNote.error && <p className="status-message" role="status">✨ <b>A IA escolheu as colunas abaixo.</b>{aiNote.reason ? ` ${aiNote.reason}` : ''}{aiNote.fallback ? ' Parte da escolha foi completada pelas regras automáticas, porque a IA indicou colunas inadequadas ou inexistentes. Confira antes de seguir.' : ' Você pode trocar qualquer uma.'}</p>}
-          <div className="form-grid">
-            {book.tables.length > 1 && <label>Aba<select value={ti} onChange={e => { setTi(+e.target.value); choose(book.tables[+e.target.value]); }}>{book.tables.map((t, i) => <option key={t.name} value={i}>{t.name} ({t.rows.length} linhas)</option>)}</select></label>}
-            <Pick label="Coluna de valor" value={map.value} onChange={v => setMap({ ...map, value: v })} cols={numCols} none="Nenhuma (só contar linhas)"/>
+          {aiNote && !aiNote.error && <p className="status-message" role="status"><b>A IA escolheu as colunas abaixo.</b>{aiNote.reason ? ` ${aiNote.reason}` : ''}{aiNote.fallback ? ' Parte da escolha foi completada pelas regras automáticas. Confira antes de seguir.' : ' Você pode trocar qualquer uma.'}</p>}
+          <div className="form-grid four">
+            {book.tables.length > 1 && <label>Aba<select value={ti} onChange={e => changeTable(+e.target.value)}>{book.tables.map((t, i) => <option key={t.name} value={i}>{t.name} ({t.rows.length} linhas)</option>)}</select></label>}
+            <Pick label="Medir" value={map.value} onChange={v => setMap({ ...map, value: v, agg: v ? (map.agg === 'count' ? 'sum' : map.agg) : 'count' })} cols={numCols} none="Só contar linhas"/>
             <label>Como combinar<select value={map.agg} onChange={e => setMap({ ...map, agg: e.target.value })}>{Object.entries(AGG).map(([k, v]) => <option key={k} value={k} disabled={!map.value && k !== 'count'}>{v}</option>)}</select></label>
-            <Pick label="Período (eixo do tempo)" value={map.period} onChange={v => setMap({ ...map, period: v })} cols={cols} none="Sem período" hint="Datas viram meses (AAAA-MM)."/>
-            <Pick label="Agrupar por" value={map.dim} onChange={v => setMap({ ...map, dim: v })} cols={cols.filter(c => c.type !== 'number')} none="Sem agrupamento"/>
+            <Pick label="Ao longo de" value={map.period} onChange={v => setMap({ ...map, period: v })} cols={cols} none="Sem período" hint="Datas viram meses."/>
+            <Pick label="Separar por" value={map.dim} onChange={v => setMap({ ...map, dim: v })} cols={cols.filter(c => c.name !== map.value && c.type !== 'date')} none="Sem separação"/>
           </div>
-          <details className="preview"><summary>Ver as primeiras linhas da planilha</summary>
-            <div className="table-wrap"><table><thead><tr>{cols.map(c => <th key={c.name}>{c.name}<span className={`badge ${c.type}`}>{TYPE_LABEL[c.type]}</span></th>)}</tr></thead>
-              <tbody>{table.rows.slice(0, 8).map((r, i) => <tr key={i}>{r.map((v, j) => <td key={j}>{String(v).slice(0, 40)}</td>)}</tr>)}</tbody></table></div></details>
+          {sameCol && <p className="m small">O período e a separação usam a mesma coluna; escolha outra em uma delas para ver as duas visões.</p>}
+          {gpu === false && <p className="m small">Sem WebGPU neste dispositivo: o resumo automático funciona normalmente; para conversar com a IA local use Chrome ou Edge atualizados.</p>}
         </section>
 
-        {warnings.length > 0 && <section className="card warn-card" aria-label="Avisos sobre os dados"><p className="eyebrow">ATENÇÃO AOS DADOS</p>
+        {result?.headline && <Headline h={result.headline}/>}
+
+        {stats && <dl className="kpis">
+          <div><dt>Registros válidos</dt><dd>{fmt(stats.n)}</dd></div>
+          <div><dt>Soma</dt><dd>{fmt(stats.sum)}</dd></div>
+          <div><dt>Média</dt><dd>{fmt(stats.mean)}</dd></div>
+          <div><dt>Mediana</dt><dd>{fmt(stats.median)}</dd></div>
+          <div><dt>Menor</dt><dd>{fmt(stats.min)}</dd></div>
+          <div><dt>Maior</dt><dd>{fmt(stats.max)}</dd></div></dl>}
+
+        {warnings.length > 0 && <section className="notice warn" aria-label="Avisos sobre os dados"><p><b>Confira antes de confiar nos números</b></p>
           <ul>{warnings.map((w, i) => <li key={i}>{w}</li>)}</ul></section>}
 
-        {stats && <div className="kpis">
-          <div className="kpi"><span>Registros válidos</span><b>{fmt(stats.n)}</b></div>
-          <div className="kpi"><span>Total</span><b>{fmt(stats.sum)}</b></div>
-          <div className="kpi"><span>Média</span><b>{fmt(stats.mean)}</b></div>
-          <div className="kpi"><span>Mediana</span><b>{fmt(stats.median)}</b></div>
-          <div className="kpi"><span>Mín. / Máx.</span><b>{fmt(stats.min)} / {fmt(stats.max)}</b></div></div>}
+        {hasTime && <section className="card chart-card"><div className="section-heading"><div><h2>{label} por período</h2>
+          <p className="m small">{timeData.length} períodos · {periodLabel(result.series[0].k)} a {periodLabel(result.series.at(-1).k)}</p></div>
+          <Segmented label="Tipo de gráfico" value={timeChart} onChange={setTimeChart} options={[['bar', 'Barras'], ['line', 'Linha']]}/></div>
+          <div className="chart-area"><ResponsiveContainer>{timeChart === 'line'
+            ? <LineChart data={timeData} margin={{ left: 0, right: 8, top: 8 }}><CartesianGrid stroke={C.grid} vertical={false}/><XAxis dataKey="label" {...axisProps} minTickGap={24}/><YAxis {...axisProps} tickFormatter={compact} width={48}/><Tooltip {...tooltipProps} formatter={v => [fmt(v), label]}/><Line dataKey="v" stroke={C.data} strokeWidth={2.5} dot={timeData.length < 25 ? { r: 3, fill: C.data } : false}/></LineChart>
+            : <BarChart data={timeData} margin={{ left: 0, right: 8, top: 8 }}><CartesianGrid stroke={C.grid} vertical={false}/><XAxis dataKey="label" {...axisProps} minTickGap={24}/><YAxis {...axisProps} tickFormatter={compact} width={48}/><Tooltip {...tooltipProps} formatter={v => [fmt(v), label]}/><Bar dataKey="v" radius={[3, 3, 0, 0]}>{timeData.map((_, i) => <Cell key={i} fill={i === timeData.length - 1 ? C.data : C.rest}/>)}</Bar></BarChart>}</ResponsiveContainer></div>
+          <p className="m small">{timeChart === 'bar' ? 'O período mais recente está destacado.' : ''}</p></section>}
 
-        {result.insights.length > 0 && <section className="card"><div className="section-heading"><div><p className="eyebrow">DESTAQUES</p><h2>O que os dados mostram</h2></div>
+        {hasDim && <section className="card chart-card"><div className="section-heading"><div><h2>{label} por {map.dim}</h2>
+          <p className="m small">{result.byDim.length} categorias{result.byDim.length > MAX_BARS ? ` · mostrando as ${MAX_BARS} maiores${additive ? ' e o resto agrupado' : ''}` : ''}</p></div>
           <button className="secondary-button" onClick={download}>Baixar resumo (CSV)</button></div>
+          <div className="chart-area tall" style={{ height: Math.max(220, topDim.length * 30 + 40) }}><ResponsiveContainer><BarChart data={topDim} layout="vertical" margin={{ left: 0, right: 16 }}>
+            <CartesianGrid stroke={C.grid} horizontal={false}/><XAxis type="number" {...axisProps} tickFormatter={compact}/><YAxis type="category" dataKey="k" {...axisProps} width={130} tickFormatter={v => short(v, 20)} interval={0}/>
+            <Tooltip {...tooltipProps} formatter={v => [fmt(v), label]}/>
+            <Bar dataKey="v" radius={[0, 3, 3, 0]} barSize={18}>{topDim.map((d, i) => <Cell key={i} fill={i === 0 && !d.rest ? C.data : C.rest}/>)}</Bar></BarChart></ResponsiveContainer></div>
+          <div className="table-wrap"><table><thead><tr><th>{map.dim}</th><th className="num">{label}</th><th className="num">{additive ? 'Parte do total' : ''}</th><th className="num">Registros</th></tr></thead>
+            <tbody>{result.byDim.slice(0, 30).map(r => <tr key={r.k}><td>{r.k}</td><td className="num">{fmt(r.v)}</td><td className="num">{share(r.v)}</td><td className="num">{fmt(r.n)}</td></tr>)}</tbody></table></div>
+          {result.byDim.length > 30 && <p className="m small">A tabela mostra as 30 maiores de {result.byDim.length}. O CSV traz todas.</p>}</section>}
+
+        {!hasTime && !hasDim && <section className="card"><p className="empty-state">Escolha uma coluna em <b>Ao longo de</b> e/ou <b>Separar por</b> para gerar gráficos.</p></section>}
+
+        {result.insights.length > 0 && <section className="card"><div className="section-heading"><h2>O que os dados mostram</h2></div>
           <ul className="insights">{result.insights.map((t, i) => <li key={i}>{t}</li>)}</ul>
           <p className="m small">Textos calculados diretamente dos dados, sem IA.</p></section>}
 
-        <LocalAiChat key={`${book.fileName}-${ti}`} context={aiContext} title="Peça uma análise dos seus dados" modelId={modelId} onModelChange={setModelId} initialOpen/>
+        <LocalAiChat key={`${book.fileName}-${ti}-${keepTotals}`} context={aiContext} title="Peça uma análise dos seus dados" modelId={modelId} onModelChange={setModelId}/>
 
-        {hasTime && <section className="card chart-card"><div className="section-heading"><div><p className="eyebrow">EVOLUÇÃO</p><h2>{label} por período</h2></div>
-          <Segmented label="Tipo de gráfico" value={timeChart} onChange={setTimeChart} options={[['line', 'Linha'], ['bar', 'Barras'], ['area', 'Área']]}/></div>
-          <div className="chart-area"><ResponsiveContainer>{timeChart === 'bar'
-            ? <BarChart data={result.series}><CartesianGrid stroke="#2c3256"/><XAxis dataKey="k" stroke="#8d93bd" fontSize={11} minTickGap={16}/><YAxis stroke="#8d93bd" fontSize={11} tickFormatter={fmt} width={70}/><Tooltip {...tip} formatter={v => fmt(v)}/><Bar dataKey="v" name={label} fill="#2dd4bf" radius={[4, 4, 0, 0]}/></BarChart>
-            : timeChart === 'area'
-            ? <AreaChart data={result.series}><CartesianGrid stroke="#2c3256"/><XAxis dataKey="k" stroke="#8d93bd" fontSize={11} minTickGap={16}/><YAxis stroke="#8d93bd" fontSize={11} tickFormatter={fmt} width={70}/><Tooltip {...tip} formatter={v => fmt(v)}/><Area dataKey="v" name={label} stroke="#2dd4bf" fill="#2dd4bf33" strokeWidth={2}/></AreaChart>
-            : <LineChart data={result.series}><CartesianGrid stroke="#2c3256"/><XAxis dataKey="k" stroke="#8d93bd" fontSize={11} minTickGap={16}/><YAxis stroke="#8d93bd" fontSize={11} tickFormatter={fmt} width={70}/><Tooltip {...tip} formatter={v => fmt(v)}/><Line dataKey="v" name={label} stroke="#2dd4bf" strokeWidth={3} dot={{ r: 3 }}/></LineChart>}</ResponsiveContainer></div></section>}
-
-        {hasDim && <section className="card chart-card"><div className="section-heading"><div><p className="eyebrow">COMPOSIÇÃO</p><h2>{label} por {map.dim}</h2></div>
-          <Segmented label="Tipo de gráfico" value={dimChart} onChange={setDimChart} options={[['bar', 'Barras'], ['pie', 'Pizza']]}/></div>
-          {result.byDim.length > 12 && <p className="m small">Mostrando as 12 maiores de {result.byDim.length} categorias.</p>}
-          <div className="chart-area tall"><ResponsiveContainer>{dimChart === 'pie' && map.agg !== 'min' && topDim.every(d => d.v >= 0)
-            ? <PieChart><Pie data={topDim} dataKey="v" nameKey="k" outerRadius="80%" label={({ name, percent }) => `${short(name, 12)} ${(percent * 100).toFixed(0)}%`}>{topDim.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]}/>)}</Pie><Tooltip {...tip} formatter={v => fmt(v)}/><Legend/></PieChart>
-            : <BarChart data={topDim} layout="vertical" margin={{ left: 10 }}><CartesianGrid stroke="#2c3256" horizontal={false}/><XAxis type="number" stroke="#8d93bd" fontSize={11} tickFormatter={fmt}/><YAxis type="category" dataKey="k" stroke="#8d93bd" fontSize={11} width={130} tickFormatter={v => short(v, 20)} interval={0}/><Tooltip {...tip} formatter={v => fmt(v)}/><Bar dataKey="v" name={label} radius={[0, 4, 4, 0]}>{topDim.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]}/>)}</Bar></BarChart>}</ResponsiveContainer></div>
-          <div className="table-wrap"><table><thead><tr><th>{map.dim}</th><th>{label}</th><th>Registros</th></tr></thead><tbody>{result.byDim.slice(0, 30).map(r => <tr key={r.k}><td>{r.k}</td><td>{fmt(r.v)}</td><td>{fmt(r.n)}</td></tr>)}</tbody></table></div></section>}
-
-        {!hasTime && !hasDim && <section className="card"><p className="empty-state">Escolha uma coluna de período e/ou de agrupamento (acima) para gerar gráficos.</p></section>}
-
+        <details className="card preview"><summary>Ver as primeiras linhas da planilha</summary>
+          <div className="table-wrap"><table><thead><tr>{cols.map(c => <th key={c.name} className={c.type === 'number' ? 'num' : ''}>{c.name}<span className={`badge ${c.type}`}>{TYPE_LABEL[c.type]}</span></th>)}</tr></thead>
+            <tbody>{table.rows.slice(0, 8).map((r, i) => <tr key={i}>{r.map((v, j) => <td key={j} className={cols[j]?.type === 'number' ? 'num' : ''}>{String(v).slice(0, 40)}</td>)}</tr>)}</tbody></table></div></details>
       </>}
     </main></>;
 }

@@ -3,20 +3,22 @@ import { useEffect, useMemo, useState } from 'react';
 import dynamic from 'next/dynamic';
 import * as XLSX from 'xlsx';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts';
+import { C, tooltipProps, axisProps, compact } from '@/lib/chart-theme';
 import { supabase } from '@/lib/supabase/client';
 import AppHeader from '@/components/AppHeader';
 import { suggestColumns } from '@/lib/suggest-columns';
-import { readSpreadsheet, inferColumns, parseNumber, toPeriod } from '@/lib/sheet';
+import { readSpreadsheet, inferColumns, parseNumber, toPeriod, comparePeriods, periodLabel, splitSummaryRows } from '@/lib/sheet';
 import LocalAiChat from '@/components/LocalAiChat';
 const HeatMap = dynamic(() => import('@/components/HeatMap'), { ssr: false });
-const fmt = n => Number(n).toLocaleString('pt-BR', { maximumFractionDigits: 2 });
+const fmt = n => n == null || !Number.isFinite(+n) ? '-' : Number(n).toLocaleString('pt-BR', { maximumFractionDigits: 2 });
+const signed = n => n == null || !Number.isFinite(+n) ? '-' : `${n > 0 ? '+' : n < 0 ? '−' : ''}${fmt(Math.abs(n))}`;
 const cleanPeriod = toPeriod;
 // Agrega no navegador: milhares de linhas viram poucas linhas (período + dimensões + soma)
 function build(rows, m, stats = { skipped: 0 }) {
   const g = new Map();
   rows.forEach(r => {
     const p = m.period ? toPeriod(r[m.period]) : m.label;
-    if (!p) throw new Error('Há períodos vazios ou inválidos na planilha. Confira a coluna de período ou informe um rótulo válido.');
+    if (!p) { if (String(r[m.val] ?? '').trim() === '') return; throw new Error('Há linhas com valor mas sem período válido. Confira a coluna de período ou informe um rótulo válido.'); }
     const d = [0, 1, 2].map(i => m.dims[i] ? String(r[m.dims[i]] ?? '').trim().slice(0, 120) : '');
     const k = [p, ...d].join('\u0001'); const a = g.get(k) || { p, d, value: 0, cnt: 0 };
     const n = parseNumber(r[m.val]);
@@ -42,7 +44,7 @@ export default function Home() {
     const { data: p } = await supabase.from('profiles').select('terms_version').eq('id', user.id).single(); if (!p?.terms_version) { location.href = '/privacidade'; return; } loadList(); })(); }, []);
   async function pick(s) {
     setSel(s); setCmp([]); if (!s) return setTot([]);
-    const { data } = await supabase.rpc('totals', { p_series: s.id }); const t = data || []; setTot(t);
+    const { data } = await supabase.rpc('totals', { p_series: s.id }); const t = [...(data || [])].sort((x, y) => comparePeriods(x.period, y.period)); setTot(t);
     setAb(v => ({ ...v, a: t.at(-2)?.period || '', b: t.at(-1)?.period || '', dim: 1 }));
   }
   useEffect(() => { if (!sel || !ab.a || !ab.b) return;
@@ -52,11 +54,11 @@ export default function Home() {
     if (x.size > 25e6) return setMsg('Arquivo maior que 25 MB.');
     try {
       const { tables } = readSpreadsheet(XLSX, await x.arrayBuffer(), x.name);
-      const t = tables[0]; if (!t?.rows.length) return setMsg('Planilha vazia.');
+      const { table: t, removed } = splitSummaryRows(tables[0]); if (!t?.rows.length) return setMsg('Planilha vazia.');
       const rows = t.rows.map(r => Object.fromEntries(t.headers.map((h, i) => [h, r[i]])));
       const cols = inferColumns(t); setFile({ rows, cols });
       setF(v => ({ ...v, val: cols.find(c => c.type === 'number')?.name || '' }));
-      setMsg(tables.length > 1 ? `A planilha tem ${tables.length} abas; foi lida a primeira ("${t.name}"). Use Analisar planilha para escolher a aba.` : '');
+      setMsg([tables.length > 1 ? `A planilha tem ${tables.length} abas; foi lida a primeira ("${t.name}"). Use Analisar planilha para escolher a aba.` : '', removed.length ? `${removed.length} linha(s) de total foram ignoradas para não duplicar os valores.` : ''].filter(Boolean).join(' '));
     } catch (err) { setMsg(err.message || 'Não foi possível ler o arquivo.'); }
   }
   async function suggest() {
@@ -91,11 +93,15 @@ export default function Home() {
   const top = useMemo(() => [...rows].sort((x, y) => Math.max(y.a, y.b) - Math.max(x.a, x.b)).slice(0, 12), [rows]);
   const mapData = useMemo(() => rows.map(r => ({ k: r.k, v: r[ab.mode === 'diff' ? 'd' : ab.mode] })), [rows, ab.mode]);
   const cols = file?.cols.map(c => c.name) || [], periods = tot.map(t => t.period);
-  const tip = { contentStyle: { background: '#161a31', border: '1px solid #2c3256' } };
+  const sum = useMemo(() => {
+    if (!tot.length) return null;
+    const last = tot.at(-1), prev = tot.at(-2), lv = +last.total, pv = prev ? +prev.total : null;
+    return { last, lv, prev, change: pv ? (lv - pv) / Math.abs(pv) * 100 : null, peak: tot.reduce((a, b) => +b.total > +a.total ? b : a) };
+  }, [tot]);
   return <><AppHeader active="series"/>
     <main className="dashboard">
-    <section className="page-intro"><p className="eyebrow">PAINEL DE DADOS</p><h1>Suas séries</h1><p className="m">Escolha uma série para continuar ou crie uma nova importando uma planilha.</p></section>
-    <section className="card workspace-card"><div className="section-heading"><div><p className="eyebrow">SÉRIES</p><h2>Escolha ou crie uma série</h2></div>
+    <section className="page-intro"><h1>Suas séries</h1><p className="m">Escolha uma série para continuar ou crie uma nova importando uma planilha.</p></section>
+    <section className="card workspace-card"><div className="section-heading"><div><h2>Escolha ou crie uma série</h2></div>
       <select aria-label="Série selecionada" value={sel?.id || ''} onChange={e => pick(list.find(x => x.id === e.target.value) || null)}>
         <option value="">Nova série</option>{list.map(l => <option key={l.id} value={l.id}>{l.name} ({l.kind})</option>)}</select></div>
       <p className="m">{sel ? 'Importe outro período para comparar com os dados existentes.' : 'Uma série reúne dados do mesmo assunto ao longo do tempo.'}</p>
@@ -104,7 +110,7 @@ export default function Home() {
         <input id="spreadsheet" type="file" accept=".xlsx,.xls,.csv" onChange={readFile} disabled={busy}/>
         <span className="m">Excel ou CSV, até 25 MB. A planilha original não é guardada.</span>
         {file && <span className="file-summary">{file.rows.length.toLocaleString('pt-BR')} linhas e {file.cols.length} colunas lidas</span>}</div>
-      {file && <div className="import-config"><div className="section-heading"><div><p className="eyebrow">PASSO 2</p><h2>Confira como organizar os dados</h2><p className="m">Escolha o valor, o período e, se quiser, até três agrupamentos.</p></div>
+      {file && <div className="import-config"><div className="section-heading"><div><h2>Confira como organizar os dados</h2><p className="m">Escolha o valor, o período e, se quiser, até três agrupamentos.</p></div>
         <button className="secondary-button" disabled={busy} onClick={suggest}>Sugerir colunas automaticamente</button></div>
         {!sel && <div className="form-grid"><label>Nome da série<input placeholder="Ex.: despesas mensais" value={f.name} onChange={e => setF({ ...f, name: e.target.value })}/></label>
           <label>Categoria<select value={f.kind} onChange={e => setF({ ...f, kind: e.target.value })}><option value="valores">Valores</option><option value="despesas">Despesas</option><option value="votos">Votos</option><option value="outro">Outro</option></select></label></div>}
@@ -118,23 +124,30 @@ export default function Home() {
       {msg && <p className="status-message" role="status">{msg}</p>}
     </section>
     {sel && <LocalAiChat key={sel.id} series={sel}/>}
-    {sel && <section className="card chart-card"><div className="section-heading"><div><p className="eyebrow">RESUMO</p><h2>Evolução por período</h2></div><span className="pill">{tot.length} períodos</span></div>
-      {tot.length ? <div className="chart-area"><ResponsiveContainer><LineChart data={tot.map(t => ({ ...t, total: +t.total }))}><CartesianGrid stroke="#2c3256"/>
-        <XAxis dataKey="period" stroke="#8d93bd" fontSize={11}/><YAxis stroke="#8d93bd" fontSize={11} tickFormatter={fmt}/><Tooltip {...tip} formatter={fmt}/>
-        <Line dataKey="total" name="Total" stroke="#2dd4bf" strokeWidth={3} dot={{ r: 3 }}/></LineChart></ResponsiveContainer></div>
+    {sel && sum && <>
+      <p className="headline">Em <b>{periodLabel(sum.last.period)}</b>, <b>{sel.name}</b> somou <b>{fmt(sum.lv)}</b>.{sum.change != null && <> Isso é <b className="delta">{sum.change >= 0 ? 'uma alta' : 'uma queda'} de {fmt(Math.abs(sum.change))}%</b> em relação a {periodLabel(sum.prev.period)}.</>}</p>
+      <dl className="kpis"><div><dt>Último período</dt><dd>{fmt(sum.lv)}</dd></div>
+        <div><dt>Variação</dt><dd>{sum.change == null ? '-' : `${signed(sum.change)}%`}</dd></div>
+        <div><dt>Maior período</dt><dd>{fmt(sum.peak.total)}<small>{periodLabel(sum.peak.period)}</small></dd></div>
+        <div><dt>Períodos na série</dt><dd>{tot.length}</dd></div></dl></>}
+    {sel && <section className="card chart-card"><div className="section-heading"><div><h2>Evolução por período</h2><p className="m small">Soma do valor de cada período. Se um período foi importado de novo, vale a última importação.</p></div></div>
+      {tot.length ? <div className="chart-area"><ResponsiveContainer><LineChart data={tot.map(t => ({ ...t, total: +t.total, label: periodLabel(t.period) }))} margin={{ left: 0, right: 8, top: 8 }}><CartesianGrid stroke={C.grid} vertical={false}/>
+        <XAxis dataKey="label" {...axisProps} minTickGap={24}/><YAxis {...axisProps} tickFormatter={compact} width={48}/><Tooltip {...tooltipProps} formatter={v => [fmt(v), 'Total']}/>
+        <Line dataKey="total" name="Total" stroke={C.data} strokeWidth={2.5} dot={tot.length < 25 ? { r: 3, fill: C.data } : false}/></LineChart></ResponsiveContainer></div>
         : <p className="empty-state">Ainda não há dados nesta série. Importe uma planilha para ver a evolução.</p>}</section>}
-    {sel && periods.length > 1 && <><section className="card chart-card"><div className="section-heading"><div><p className="eyebrow">COMPARAÇÃO</p><h2>Compare períodos</h2></div></div><div className="form-grid comparison-controls">
-      <label>Período inicial<select value={ab.a} onChange={e => setAb({ ...ab, a: e.target.value })}>{periods.map(p => <option key={p}>{p}</option>)}</select></label>
-      <label>Período final<select value={ab.b} onChange={e => setAb({ ...ab, b: e.target.value })}>{periods.map(p => <option key={p}>{p}</option>)}</select></label>
+    {sel && periods.length > 1 && <><section className="card chart-card"><div className="section-heading"><div><h2>Compare períodos</h2><p className="m small">{ab.a === ab.b ? 'Escolha dois períodos diferentes para ver a diferença.' : `${periodLabel(ab.a)} contra ${periodLabel(ab.b)}, por ${sel.dims[ab.dim - 1] || 'total'}.`}</p></div></div><div className="form-grid comparison-controls">
+      <label>Período inicial<select value={ab.a} onChange={e => setAb({ ...ab, a: e.target.value })}>{periods.map(p => <option key={p} value={p}>{periodLabel(p)}</option>)}</select></label>
+      <label>Período final<select value={ab.b} onChange={e => setAb({ ...ab, b: e.target.value })}>{periods.map(p => <option key={p} value={p}>{periodLabel(p)}</option>)}</select></label>
       {sel.dims.length > 0 && <label>Agrupar por<select value={ab.dim} onChange={e => setAb({ ...ab, dim: +e.target.value })}>{sel.dims.map((d, i) => <option key={d} value={i + 1}>{d}</option>)}</select></label>}</div>
-      {sel.dims.length > 0 && <div className="chart-area comparison-chart"><ResponsiveContainer><BarChart data={top}><CartesianGrid stroke="#2c3256"/><XAxis dataKey="k" stroke="#8d93bd" fontSize={11} interval={0} angle={-30} textAnchor="end" height={70} tickFormatter={v => String(v).length > 14 ? String(v).slice(0, 13) + '…' : v}/>
-        <YAxis stroke="#8d93bd" fontSize={11} tickFormatter={fmt}/><Tooltip {...tip} formatter={fmt}/><Legend/>
-        <Bar dataKey="a" name={ab.a} fill="#7c6cff" radius={[4, 4, 0, 0]}/><Bar dataKey="b" name={ab.b} fill="#2dd4bf" radius={[4, 4, 0, 0]}/></BarChart></ResponsiveContainer></div>}
-      {sel.dims.length > 0 && <div className="table-wrap"><table><thead><tr><th>{sel.dims[ab.dim - 1]}</th><th>{ab.a}</th><th>{ab.b}</th><th>Diferença</th><th>Variação</th></tr></thead><tbody>
-        {rows.slice(0, 50).map(r => <tr key={r.k}><td>{r.k || '(vazio)'}</td><td>{fmt(r.a)}</td><td>{fmt(r.b)}</td>
-          <td>{fmt(r.d)}</td><td>{r.p == null ? '-' : fmt(r.p) + '%'}</td></tr>)}</tbody></table></div>}</section>
-      {sel.dims.length > 0 && <section className="card chart-card"><div className="section-heading"><div><p className="eyebrow">VISUALIZAÇÃO</p><h2>Mapa de calor</h2></div>
-        <select aria-label="Valor exibido no mapa" value={ab.mode} onChange={e => setAb({ ...ab, mode: e.target.value })}><option value="b">Valor em {ab.b}</option><option value="a">Valor em {ab.a}</option><option value="diff">Variação</option></select></div>
-        <p className="m">Use siglas de UF ou códigos IBGE de município para mapear os dados.</p><HeatMap data={mapData}/></section>}</>}
+      {sel.dims.length > 0 && <div className="chart-area comparison-chart"><ResponsiveContainer><BarChart data={top}><CartesianGrid stroke="#2c3256"/><XAxis dataKey="k" {...axisProps} interval={0} angle={-30} textAnchor="end" height={70} tickFormatter={v => String(v).length > 14 ? String(v).slice(0, 13) + '…' : (v || '(vazio)')}/>
+        <YAxis {...axisProps} tickFormatter={compact} width={48}/><Tooltip {...tooltipProps} formatter={v => fmt(v)}/><Legend iconType="circle" wrapperStyle={{ fontSize: 12 }}/>
+        <Bar dataKey="a" name={periodLabel(ab.a)} fill={C.compare} radius={[3, 3, 0, 0]}/><Bar dataKey="b" name={periodLabel(ab.b)} fill={C.data} radius={[3, 3, 0, 0]}/></BarChart></ResponsiveContainer></div>}
+      {sel.dims.length > 0 && <div className="table-wrap"><table><thead><tr><th>{sel.dims[ab.dim - 1]}</th><th className="num">{periodLabel(ab.a)}</th><th className="num">{periodLabel(ab.b)}</th><th className="num">Diferença</th><th className="num">Variação</th></tr></thead><tbody>
+        {rows.slice(0, 50).map(r => <tr key={r.k}><td>{r.k || '(vazio)'}</td><td className="num">{fmt(r.a)}</td><td className="num">{fmt(r.b)}</td>
+          <td className="num">{signed(r.d)}</td><td className="num">{r.p == null ? <span title="O período inicial não tem valor para comparar">novo</span> : signed(r.p) + '%'}</td></tr>)}</tbody></table></div>}
+      {rows.length > 50 && <p className="m small">A tabela mostra as 50 maiores diferenças de {rows.length} itens.</p>}</section>
+      {sel.dims.length > 0 && <section className="card chart-card"><div className="section-heading"><div><h2>Mapa</h2></div>
+        <select aria-label="Valor exibido no mapa" value={ab.mode} onChange={e => setAb({ ...ab, mode: e.target.value })}><option value="b">Valor em {periodLabel(ab.b)}</option><option value="a">Valor em {periodLabel(ab.a)}</option><option value="diff">Variação</option></select></div>
+        <p className="m">Use siglas de UF ou códigos IBGE de município para mapear os dados.</p><HeatMap data={mapData} diverging={ab.mode === 'diff'}/></section>}</>}
     </main></>;
 }
