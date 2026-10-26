@@ -1,7 +1,8 @@
 'use client';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import * as XLSX from 'xlsx';
-import { ResponsiveContainer, LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
+import { ResponsiveContainer, LineChart, Line, BarChart, Bar, AreaChart, Area, PieChart, Pie, Cell, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
 import AppHeader from '@/components/AppHeader';
 import LocalAiChat from '@/components/LocalAiChat';
 import { readSpreadsheet, inferColumns, splitSummaryRows, periodLabel } from '@/lib/sheet';
@@ -14,6 +15,7 @@ const MAX_BYTES = 25e6;
 const MAX_BARS = 12;
 const short = (s, n = 18) => String(s).length > n ? String(s).slice(0, n - 1) + '…' : String(s);
 const TYPE_LABEL = { number: 'número', date: 'data', text: 'texto' };
+const HeatMap = dynamic(() => import('@/components/HeatMap'), { ssr: false });
 
 function Segmented({ value, onChange, options, label }) {
   return <div className="segmented" role="group" aria-label={label}>{options.map(([v, l]) =>
@@ -40,6 +42,8 @@ export default function Analise() {
   const [keepTotals, setKeepTotals] = useState(false);
   const [map, setMap] = useState({ value: '', period: '', dim: '', agg: 'sum' });
   const [timeChart, setTimeChart] = useState('bar');
+  const [dimChart, setDimChart] = useState('bar');
+  const [cityFilter, setCityFilter] = useState('');
   const [msg, setMsg] = useState(''), [busy, setBusy] = useState(false), [drag, setDrag] = useState(false);
   const input = useRef();
   const [modelId, setModelId] = useState(MODELS[0].id), [gpu, setGpu] = useState(null);
@@ -122,6 +126,16 @@ export default function Analise() {
   }, [result, additive]);
   const timeData = useMemo(() => (result?.series || []).map(s => ({ ...s, label: periodLabel(s.k) })), [result]);
   const sameCol = map.period && map.period === map.dim;
+  const filteredDim = useMemo(() => {
+    if (!result?.byDim?.length) return [];
+    const rows = cityFilter ? result.byDim.filter(r => String(r.k).toLowerCase().includes(cityFilter.toLowerCase())) : result.byDim;
+    return rows.slice(0, MAX_BARS);
+  }, [result, cityFilter]);
+  const geoData = useMemo(() => {
+    if (!result?.byDim?.length || !map.dim) return [];
+    const base = result.byDim.filter(r => r.v != null && Number.isFinite(r.v));
+    return base.map(r => ({ k: r.k, v: r.v }));
+  }, [result, map.dim]);
 
   return <><AppHeader active="analise"/>
     <main className="dashboard">
@@ -185,14 +199,20 @@ export default function Analise() {
 
         {hasDim && <section className="card chart-card"><div className="section-heading"><div><h2>{label} por {map.dim}</h2>
           <p className="m small">{result.byDim.length} categorias{result.byDim.length > MAX_BARS ? ` · mostrando as ${MAX_BARS} maiores${additive ? ' e o resto agrupado' : ''}` : ''}</p></div>
-          <button className="secondary-button" onClick={download}>Baixar resumo (CSV)</button></div>
-          <div className="chart-area tall" style={{ height: Math.max(220, topDim.length * 30 + 40) }}><ResponsiveContainer><BarChart data={topDim} layout="vertical" margin={{ left: 0, right: 16 }}>
+          <div className="btn-row"><button className="secondary-button" onClick={download}>Baixar resumo (CSV)</button><Segmented label="Tipo de gráfico" value={dimChart} onChange={setDimChart} options={[['bar', 'Barras'], ['area', 'Área'], ['pie', 'Pizza']]}/></div></div>
+          {(dimChart === 'bar' || dimChart === 'area') && <div className="chart-area tall" style={{ height: Math.max(220, filteredDim.length * 30 + 40) }}><ResponsiveContainer><BarChart data={filteredDim.length ? filteredDim : topDim} layout="vertical" margin={{ left: 0, right: 16 }}>
             <CartesianGrid stroke={C.grid} horizontal={false}/><XAxis type="number" {...axisProps} tickFormatter={compact}/><YAxis type="category" dataKey="k" {...axisProps} width={130} tickFormatter={v => short(v, 20)} interval={0}/>
             <Tooltip {...tooltipProps} formatter={v => [fmt(v), label]}/>
-            <Bar dataKey="v" radius={[0, 3, 3, 0]} barSize={18}>{topDim.map((d, i) => <Cell key={i} fill={i === 0 && !d.rest ? C.data : C.rest}/>)}</Bar></BarChart></ResponsiveContainer></div>
+            <Bar dataKey="v" radius={[0, 3, 3, 0]} barSize={18}>{(filteredDim.length ? filteredDim : topDim).map((d, i) => <Cell key={i} fill={i === 0 && !d.rest ? C.data : C.rest}/>)}</Bar></BarChart></ResponsiveContainer></div>}
+          {dimChart === 'pie' && <div className="chart-area" style={{ height: 260 }}><ResponsiveContainer><PieChart><Pie data={filteredDim.length ? filteredDim : topDim} dataKey="v" nameKey="k" innerRadius={45} outerRadius={90} paddingAngle={2}>{(filteredDim.length ? filteredDim : topDim).map((d, i) => <Cell key={i} fill={i % 2 === 0 ? C.data : C.rest}/>)}</Pie><Tooltip {...tooltipProps} formatter={v => [fmt(v), label]}/></PieChart></ResponsiveContainer></div>}
+          <div className="form-grid inline"><label className="search-field">Filtrar por nome<input value={cityFilter} onChange={e => setCityFilter(e.target.value)} placeholder="Digite parte do nome"/></label></div>
           <div className="table-wrap"><table><thead><tr><th>{map.dim}</th><th className="num">{label}</th><th className="num">{additive ? 'Parte do total' : ''}</th><th className="num">Registros</th></tr></thead>
-            <tbody>{result.byDim.slice(0, 30).map(r => <tr key={r.k}><td>{r.k}</td><td className="num">{fmt(r.v)}</td><td className="num">{share(r.v)}</td><td className="num">{fmt(r.n)}</td></tr>)}</tbody></table></div>
+            <tbody>{(cityFilter ? filteredDim : result.byDim.slice(0, 30)).map(r => <tr key={r.k}><td>{r.k}</td><td className="num">{fmt(r.v)}</td><td className="num">{share(r.v)}</td><td className="num">{fmt(r.n)}</td></tr>)}</tbody></table></div>
           {result.byDim.length > 30 && <p className="m small">A tabela mostra as 30 maiores de {result.byDim.length}. O CSV traz todas.</p>}</section>}
+
+        {geoData.length > 0 && <section className="card chart-card"><div className="section-heading"><div><h2>Mapa de calor por município/UF</h2><p className="m small">Consulta geográfica pelos municípios ou estados da categoria selecionada.</p></div></div>
+          <HeatMap data={geoData} diverging={map.agg === 'mean'} />
+        </section>}
 
         {!hasTime && !hasDim && <section className="card"><p className="empty-state">Escolha uma coluna em <b>Ao longo de</b> e/ou <b>Separar por</b> para gerar gráficos.</p></section>}
 
