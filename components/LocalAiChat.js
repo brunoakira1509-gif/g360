@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase/client';
 import { verifyNumbers } from '@/lib/analyze';
 import { comparePeriods } from '@/lib/sheet';
-import { MODELS, ensureEngine, peekEngine, releaseEngine, checkWebGpu } from '@/lib/local-engine';
+import { MODELS, ensureEngine, peekEngine, releaseEngine, checkWebGpu, getErrorMessage } from '@/lib/local-engine';
 
 const QUICK_QUESTIONS = ['Resuma os principais pontos desta análise.', 'O que mais chama atenção nos dados?', 'Há algo que eu deva conferir antes de confiar nesses números?'];
 const MAX_FACT_ROWS = 3000;
@@ -75,7 +75,7 @@ export default function LocalAiChat({ series, context: givenContext, title = 'Co
       if (mountedRef.current) { setReady(true); setStatus('Modelo pronto neste dispositivo.'); }
       return engine;
     } catch (error) {
-      setStatus(`Não foi possível iniciar o modelo local: ${error.message || 'verifique o suporte WebGPU e a memória do dispositivo.'}`);
+      setStatus(`Não foi possível iniciar o modelo local: ${getErrorMessage(error, 'Verifique o suporte WebGPU, a memória disponível e a conexão para baixar o modelo.')}`);
       return null;
     } finally {
       setLoading(false);
@@ -148,7 +148,7 @@ export default function LocalAiChat({ series, context: givenContext, title = 'Co
         warning: unverified.length ? `Conferência automática: ${unverified.join(', ')} não aparece(m) nos dados calculados. Confira nos gráficos antes de usar.` : '' }]);
       setStatus('A análise foi executada localmente neste dispositivo.');
     } catch (error) {
-      setMessages(current => [...current, { role: 'assistant', content: `Não consegui analisar agora: ${error.message}` }]);
+      setMessages(current => [...current, { role: 'assistant', content: `Não consegui analisar agora: ${getErrorMessage(error)}` }]);
       setStatus('Os dados não foram enviados a um serviço externo de IA.');
     } finally {
       setSending(false);

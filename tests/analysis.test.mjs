@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { toPeriod, comparePeriods, periodLabel, splitSummaryRows, inferColumns, parseNumber } from '../lib/sheet.js';
 import { analyze, suggest } from '../lib/analyze.js';
+import { aiSuggest } from '../lib/ai-select.js';
 
 const table = (headers, rows) => ({ name: 't', headers, rows });
 
@@ -51,6 +52,21 @@ test('sugestão não confunde "plano"/"urbano" com a coluna Ano', () => {
   const t = table(['Plano', 'Ano', 'Receita'], [['x', 2024, 5], ['y', 2025, 7], ['z', 2025, 9]]);
   const s = suggest(inferColumns(t));
   assert.equal(s.value, 'Receita');
+});
+
+test('seleção por IA informa quando o modelo não retorna conteúdo', async () => {
+  const t = table(['Categoria', 'Valor'], [['A', 10], ['B', 20]]);
+  const engine = { chat: { completions: { create: async () => ({ choices: [] }) } } };
+  await assert.rejects(aiSuggest(engine, t, inferColumns(t)), /IA não retornou uma resposta/);
+});
+
+test('seleção por IA preserva o erro da tentativa estruturada e da tentativa simples', async () => {
+  const t = table(['Categoria', 'Valor'], [['A', 10], ['B', 20]]);
+  const engine = { chat: { completions: { create: async options => {
+    if (options.response_format) throw { reason: 'formato indisponível' };
+    throw new Error('memória insuficiente');
+  } } } };
+  await assert.rejects(aiSuggest(engine, t, inferColumns(t)), /formato indisponível.*memória insuficiente/);
 });
 
 test('números brasileiros e americanos', () => {

@@ -6,7 +6,7 @@ import { ResponsiveContainer, LineChart, Line, BarChart, Bar, AreaChart, Area, P
 import AppHeader from '@/components/AppHeader';
 import LocalAiChat from '@/components/LocalAiChat';
 import { readSpreadsheet, inferColumns, splitSummaryRows, periodLabel } from '@/lib/sheet';
-import { MODELS, ensureEngine, releaseEngine, checkWebGpu } from '@/lib/local-engine';
+import { MODELS, ensureEngine, releaseEngine, checkWebGpu, getErrorMessage } from '@/lib/local-engine';
 import { aiSuggest } from '@/lib/ai-select';
 import { analyze, suggest, qualityWarnings, numericStats, fmt, AGG } from '@/lib/analyze';
 import { C, tooltipProps, axisProps, compact } from '@/lib/chart-theme';
@@ -86,7 +86,9 @@ export default function Analise() {
       setAiStatus('A IA está analisando as colunas...');
       const r = await aiSuggest(engine, table, cols);
       setMap(r.map); setAiNote({ reason: r.reason, fallback: r.fallback, used: r.usedAi });
-    } catch (e) { setAiNote({ error: `Não foi possível usar a IA local (${e.message || 'erro desconhecido'}). Use "Sugerir automaticamente".` }); }
+    } catch (e) {
+      setAiNote({ error: `Não foi possível usar a IA local (${getErrorMessage(e)}). Confira o suporte WebGPU, a memória disponível e a conexão para baixar o modelo. Use "Sugerir automaticamente" enquanto isso.` });
+    }
     setAiBusy(false); setAiStatus('');
   }
   async function load(file) {
