@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase/client';
+import AppHeader from '@/components/AppHeader';
 export default function Admin() {
   const [users, setUsers] = useState([]); const [msg, setMsg] = useState('');
   const load = async () => { const { data } = await supabase.from('profiles').select('*').order('created_at'); setUsers(data || []); };
@@ -15,7 +16,7 @@ export default function Admin() {
   }
   async function reset(u) { if (!confirm('Resetar o 2FA de ' + u.email + '? Ele cadastrará um novo celular no próximo login.')) return;
     await fetch('/api/admin/users', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: u.id }) }); setMsg('2FA resetado.'); }
-  return <><header><b>Administração</b><a href="/">Voltar ao painel</a></header><main>
+  return <><AppHeader active="admin"/><main>
     <div className="card"><h3>Criar conta</h3>
       <p className="m">A pessoa receberá um convite para confirmar o e-mail e definir a própria senha.</p>
       <form className="row" onSubmit={create}><input name="email" type="email" placeholder="E-mail" required/>

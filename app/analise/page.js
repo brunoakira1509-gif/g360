@@ -5,7 +5,7 @@ import { ResponsiveContainer, LineChart, Line, BarChart, Bar, AreaChart, Area, P
 import AppHeader from '@/components/AppHeader';
 import LocalAiChat from '@/components/LocalAiChat';
 import { readSpreadsheet, inferColumns } from '@/lib/sheet';
-import { MODELS, ensureEngine, releaseEngine, hasWebGpu } from '@/lib/local-engine';
+import { MODELS, ensureEngine, releaseEngine, checkWebGpu } from '@/lib/local-engine';
 import { aiSuggest } from '@/lib/ai-select';
 import { analyze, suggest, qualityWarnings, numericStats, fmt, AGG } from '@/lib/analyze';
 
@@ -32,7 +32,7 @@ export default function Analise() {
   const input = useRef();
   const [modelId, setModelId] = useState(MODELS[0].id), [gpu, setGpu] = useState(null);
   const [aiBusy, setAiBusy] = useState(false), [aiStatus, setAiStatus] = useState(''), [aiNote, setAiNote] = useState(null);
-  useEffect(() => { setGpu(hasWebGpu()); return () => { releaseEngine(); }; }, []);
+  useEffect(() => { checkWebGpu().then(setGpu); return () => { releaseEngine(); }; }, []);
 
   const table = book?.tables[ti];
   const cols = useMemo(() => table ? inferColumns(table) : [], [table]);
@@ -40,7 +40,17 @@ export default function Analise() {
   const result = useMemo(() => table ? analyze(table, cols, map) : null, [table, cols, map]);
   const warnings = useMemo(() => table ? qualityWarnings(table, cols, cols.find(c => c.name === map.value)) : [], [table, cols, map.value]);
   const stats = useMemo(() => table && map.value ? numericStats(table, cols.find(c => c.name === map.value)?.index) : null, [table, cols, map.value]);
-  const aiContext = useMemo(() => result ? { analise: result.facts, resumo: result.insights, avisos: warnings } : null, [result, warnings]);
+  const aiContext = useMemo(() => {
+    if (!result) return null;
+    const periods = result.facts.periodos || [];
+    const compactFacts = { ...result.facts, periodos: periods.slice(-36) };
+    return {
+      analise: compactFacts,
+      resumo: result.insights,
+      avisos: warnings,
+      ...(periods.length > 36 ? { limitacoes: `A série tem ${periods.length} períodos; a IA recebeu os 36 mais recentes.` } : {}),
+    };
+  }, [result, warnings]);
 
   function choose(tbl) {
     setAiNote(null);
@@ -84,8 +94,8 @@ export default function Analise() {
 
   return <><AppHeader active="analise"/>
     <main className="dashboard">
-      <section className="page-intro"><p className="eyebrow">ANÁLISE RÁPIDA</p><h1>Planilha → gráficos e análise</h1>
-        <p className="m">Tudo é calculado no seu navegador. A planilha não é enviada nem guardada.</p></section>
+      <section className="page-intro"><p className="eyebrow">ANÁLISE DE PLANILHA</p><h1>Entenda seus dados</h1>
+        <p className="m">1. Envie uma planilha. 2. Confira as colunas. 3. Veja os destaques e converse com a IA local. A planilha não sai do seu navegador.</p></section>
 
       <section className="card">
         <div className={`dropzone${drag ? ' over' : ''}`} onDragOver={e => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)}
@@ -103,7 +113,7 @@ export default function Analise() {
           <div className="section-heading"><div><p className="eyebrow">PASSO 2</p><h2>O que analisar</h2></div>
             <div className="btn-row"><button className="secondary-button" disabled={aiBusy} onClick={() => choose(table)}>Sugerir automaticamente</button>
               <button disabled={aiBusy || gpu === false} onClick={pickWithAi} title={gpu === false ? 'Este navegador não tem WebGPU' : ''}>{aiBusy ? 'IA trabalhando...' : '✨ Escolher com IA'}</button></div></div>
-          {gpu === false && <p className="m small">"Escolher com IA" precisa de WebGPU (Chrome ou Edge atuais em computador compatível). "Sugerir automaticamente" funciona em qualquer navegador.</p>}
+          {gpu === false && <p className="m small">Este dispositivo não disponibilizou WebGPU. O resumo automático continua funcionando; para conversar com a IA local, tente Chrome ou Edge atualizados em um dispositivo compatível.</p>}
           {gpu && <label className="model-pick">Modelo da IA<select value={modelId} disabled={aiBusy} onChange={e => setModelId(e.target.value)}>{MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}</select></label>}
           {aiStatus && <p className="status-message" role="status">{aiStatus}</p>}
           {aiNote?.error && <p className="status-message" role="alert">{aiNote.error}</p>}
@@ -135,6 +145,8 @@ export default function Analise() {
           <ul className="insights">{result.insights.map((t, i) => <li key={i}>{t}</li>)}</ul>
           <p className="m small">Textos calculados diretamente dos dados, sem IA.</p></section>}
 
+        <LocalAiChat key={`${book.fileName}-${ti}`} context={aiContext} title="Peça uma análise dos seus dados" modelId={modelId} onModelChange={setModelId} initialOpen/>
+
         {hasTime && <section className="card chart-card"><div className="section-heading"><div><p className="eyebrow">EVOLUÇÃO</p><h2>{label} por período</h2></div>
           <Segmented label="Tipo de gráfico" value={timeChart} onChange={setTimeChart} options={[['line', 'Linha'], ['bar', 'Barras'], ['area', 'Área']]}/></div>
           <div className="chart-area"><ResponsiveContainer>{timeChart === 'bar'
@@ -153,7 +165,6 @@ export default function Analise() {
 
         {!hasTime && !hasDim && <section className="card"><p className="empty-state">Escolha uma coluna de período e/ou de agrupamento (acima) para gerar gráficos.</p></section>}
 
-        <LocalAiChat key={`${book.fileName}-${ti}`} context={aiContext} title="Pergunte sobre estes dados" modelId={modelId} onModelChange={setModelId}/>
       </>}
     </main></>;
 }

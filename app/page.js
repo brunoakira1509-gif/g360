@@ -4,6 +4,7 @@ import dynamic from 'next/dynamic';
 import * as XLSX from 'xlsx';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { supabase } from '@/lib/supabase/client';
+import AppHeader from '@/components/AppHeader';
 import { suggestColumns } from '@/lib/suggest-columns';
 import { readSpreadsheet, inferColumns, parseNumber, toPeriod } from '@/lib/sheet';
 import LocalAiChat from '@/components/LocalAiChat';
@@ -32,13 +33,13 @@ function build(rows, m, stats = { skipped: 0 }) {
 }
 const Sel = ({ v, on, opts, ph }) => <select value={v} onChange={e => on(e.target.value)}><option value="">{ph}</option>{opts.map(o => <option key={o}>{o}</option>)}</select>;
 export default function Home() {
-  const [role, setRole] = useState(null), [list, setList] = useState([]), [sel, setSel] = useState(null), [tot, setTot] = useState([]);
+  const [list, setList] = useState([]), [sel, setSel] = useState(null), [tot, setTot] = useState([]);
   const [file, setFile] = useState(null), [f, setF] = useState({ name: '', kind: 'valores', period: '', label: '', dims: ['', '', ''], val: '' });
   const [cmp, setCmp] = useState([]), [ab, setAb] = useState({ a: '', b: '', dim: 1, mode: 'b' }), [msg, setMsg] = useState(''), [busy, setBusy] = useState(false);
   const loadList = async () => { const { data } = await supabase.from('series').select('*').order('created_at', { ascending: false }); setList(data || []); return data || []; };
   useEffect(() => { (async () => {
     const { data: { user } } = await supabase.auth.getUser();
-    const { data: p } = await supabase.from('profiles').select('role,terms_version').eq('id', user.id).single(); if (!p?.terms_version) { location.href = '/privacidade'; return; } setRole(p?.role); loadList(); })(); }, []);
+    const { data: p } = await supabase.from('profiles').select('terms_version').eq('id', user.id).single(); if (!p?.terms_version) { location.href = '/privacidade'; return; } loadList(); })(); }, []);
   async function pick(s) {
     setSel(s); setCmp([]); if (!s) return setTot([]);
     const { data } = await supabase.rpc('totals', { p_series: s.id }); const t = data || []; setTot(t);
@@ -55,7 +56,7 @@ export default function Home() {
       const rows = t.rows.map(r => Object.fromEntries(t.headers.map((h, i) => [h, r[i]])));
       const cols = inferColumns(t); setFile({ rows, cols });
       setF(v => ({ ...v, val: cols.find(c => c.type === 'number')?.name || '' }));
-      setMsg(tables.length > 1 ? `A planilha tem ${tables.length} abas; foi lida a primeira ("${t.name}"). Use a Análise rápida para escolher a aba.` : '');
+      setMsg(tables.length > 1 ? `A planilha tem ${tables.length} abas; foi lida a primeira ("${t.name}"). Use Analisar planilha para escolher a aba.` : '');
     } catch (err) { setMsg(err.message || 'Não foi possível ler o arquivo.'); }
   }
   async function suggest() {
@@ -86,28 +87,14 @@ export default function Home() {
   }
   async function del() { if (!confirm('Excluir esta série e todos os dados dela?')) return;
     await supabase.from('series').delete().eq('id', sel.id); setSel(null); setTot([]); loadList(); }
-  async function exportar() {
-    const { data: s } = await supabase.from('series').select('id,name,kind,dims,created_at'); let facts = [];
-    for (let i = 0; ; i += 1000) { const { data } = await supabase.from('facts').select('series_id,period,d1,d2,d3,value,cnt').order('series_id').order('period').order('d1').order('d2').order('d3').range(i, i + 999);
-      if (!data?.length) break; facts = facts.concat(data); if (data.length < 1000) break; }
-    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify({ series: s, facts }, null, 1)], { type: 'application/json' })); a.download = 'meus-dados.json'; a.click();
-  }
-  async function apagar() {
-    if (!confirm('Excluir sua conta e TODOS os seus dados? Isso não pode ser desfeito.')) return;
-    const r = await fetch('/api/account', { method: 'DELETE' }); const j = await r.json(); if (!r.ok) return setMsg(j.error);
-    await supabase.auth.signOut(); location.href = '/login';
-  }
   const rows = useMemo(() => cmp.map(r => ({ k: r.k, a: +r.a, b: +r.b, d: +r.b - +r.a, p: +r.a ? (+r.b - +r.a) / Math.abs(+r.a) * 100 : null })).sort((x, y) => y.d - x.d), [cmp]);
   const top = useMemo(() => [...rows].sort((x, y) => Math.max(y.a, y.b) - Math.max(x.a, x.b)).slice(0, 12), [rows]);
   const mapData = useMemo(() => rows.map(r => ({ k: r.k, v: r[ab.mode === 'diff' ? 'd' : ab.mode] })), [rows, ab.mode]);
   const cols = file?.cols.map(c => c.name) || [], periods = tot.map(t => t.period);
   const tip = { contentStyle: { background: '#161a31', border: '1px solid #2c3256' } };
-  return <><header className="app-header"><a className="brand" href="/">Painel <span>G360</span></a><nav className="header-actions">
-    <a href="/analise">Análise rápida</a>{role === 'admin' && <a href="/admin">Administração</a>}<a href="/privacidade">Privacidade</a>
-    <button className="ghost" onClick={exportar}>Baixar dados</button><button className="ghost danger-ghost" onClick={apagar}>Excluir conta</button>
-    <button className="ghost" onClick={async () => { await supabase.auth.signOut(); location.href = '/login'; }}>Sair</button></nav></header>
+  return <><AppHeader active="series"/>
     <main className="dashboard">
-    <section className="page-intro"><p className="eyebrow">ANÁLISE DE DADOS</p><h1>Seu painel</h1><p className="m">Importe uma planilha, organize os dados e acompanhe a evolução.</p></section>
+    <section className="page-intro"><p className="eyebrow">PAINEL DE DADOS</p><h1>Suas séries</h1><p className="m">Escolha uma série para continuar ou crie uma nova importando uma planilha.</p></section>
     <section className="card workspace-card"><div className="section-heading"><div><p className="eyebrow">SÉRIES</p><h2>Escolha ou crie uma série</h2></div>
       <select aria-label="Série selecionada" value={sel?.id || ''} onChange={e => pick(list.find(x => x.id === e.target.value) || null)}>
         <option value="">Nova série</option>{list.map(l => <option key={l.id} value={l.id}>{l.name} ({l.kind})</option>)}</select></div>

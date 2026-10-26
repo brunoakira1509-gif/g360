@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase/client';
 import { verifyNumbers } from '@/lib/analyze';
-import { MODELS, ensureEngine, peekEngine, releaseEngine, hasWebGpu } from '@/lib/local-engine';
+import { MODELS, ensureEngine, peekEngine, releaseEngine, checkWebGpu } from '@/lib/local-engine';
 
 const QUICK_QUESTIONS = ['Resuma os principais pontos desta análise.', 'O que mais chama atenção nos dados?', 'Há algo que eu deva conferir antes de confiar nesses números?'];
 const MAX_FACT_ROWS = 3000;
@@ -28,13 +28,13 @@ function summarizeFacts(facts, dimensions) {
   };
 }
 
-export default function LocalAiChat({ series, context: givenContext, title = 'Converse sobre esta série', modelId: modelProp, onModelChange }) {
+export default function LocalAiChat({ series, context: givenContext, title = 'Converse sobre esta série', modelId: modelProp, onModelChange, initialOpen = false }) {
   const [modelLocal, setModelLocal] = useState(MODELS[0].id);
   const modelId = modelProp ?? modelLocal, setModelId = onModelChange ?? setModelLocal;
   const [ready, setReady] = useState(false);
   const engineRef = useRef(null);
   const mountedRef = useRef(false);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(initialOpen);
   const [supported, setSupported] = useState(null);
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(false);
@@ -47,7 +47,7 @@ export default function LocalAiChat({ series, context: givenContext, title = 'Co
   const quick = !!givenContext;
 
   useEffect(() => {
-    setSupported(hasWebGpu());
+    checkWebGpu().then(setSupported);
   }, []);
 
   useEffect(() => { setReady(!!peekEngine(modelId)); }, [modelId]);
@@ -62,7 +62,7 @@ export default function LocalAiChat({ series, context: givenContext, title = 'Co
   }, [seriesId]);
 
   async function loadModel() {
-    if (!hasWebGpu()) { setSupported(false); return null; }
+    if (!(await checkWebGpu())) { setSupported(false); return null; }
     const loaded = peekEngine(modelId);
     if (loaded) { engineRef.current = loaded; setReady(true); return loaded; }
     if (loading) return null;
@@ -129,7 +129,8 @@ export default function LocalAiChat({ series, context: givenContext, title = 'Co
           role: 'system',
           content: `Você é um assistente de análise de dados em português do Brasil. Os números abaixo JÁ foram calculados e conferidos por código. Regras: (1) cite os números exatamente como aparecem; (2) não faça contas novas nem estime valores; (3) não afirme causas, apenas descreva o que os dados mostram; (4) se a resposta não estiver nos dados, diga que não consegue responder com o que foi calculado; (5) seja curto e direto. ${
             context.truncated ? `ATENÇÃO: o resumo cobre ${context.loadedRows} de ${context.totalRows} linhas agregadas; informe essa limitação quando relevante.` : ''
-          }\nDADOS: ${JSON.stringify(context)}`,
+            }${context.limitacoes ? ` ATENÇÃO: ${context.limitacoes}` : ''
+            }\nDADOS: ${JSON.stringify(context)}`,
         },
         ...messages.filter(m => !m.warning).slice(-MAX_HISTORY_MESSAGES).map(({ role, content }) => ({ role, content })),
         { role: 'user', content: text },
@@ -156,7 +157,7 @@ export default function LocalAiChat({ series, context: givenContext, title = 'Co
   return <section className="card chart-card local-ai-card">
     <div className="section-heading"><div><p className="eyebrow">ASSISTENTE LOCAL</p><h2>{title}</h2></div>
       <button className="secondary-button" onClick={() => setOpen(value => !value)}>{open ? 'Fechar assistente' : 'Abrir assistente'}</button></div>
-    <p className="m">A análise roda neste navegador. Na primeira utilização, o modelo precisa ser baixado (conexão e espaço disponíveis). Requer navegador e dispositivo compatíveis com WebGPU; os dados não são enviados a uma API de IA.</p>
+    <p className="m">Faça perguntas sobre tendências, diferenças e pontos de atenção. A IA roda neste dispositivo; na primeira vez é preciso baixar o modelo. Seus dados não são enviados a uma API de IA.</p>
     {open && <div className="local-ai-body">
       {supported === false && <p className="status-message" role="status">Este navegador não oferece WebGPU. Use uma versão atual do Chrome/Edge em um dispositivo compatível; as sugestões locais de colunas continuam disponíveis.</p>}
       {supported && !ready && <label className="model-pick">Modelo<select value={modelId} disabled={loading} onChange={e => setModelId(e.target.value)}>{MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}</select></label>}

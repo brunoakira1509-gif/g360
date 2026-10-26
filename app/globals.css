@@ -18,8 +18,28 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font-size: 15px;
+  font-size: var(--base-font-size, 15px);
   line-height: 1.55;
+}
+
+html[data-text-size="large"] body { --base-font-size: 18px; }
+html[data-high-contrast="true"] {
+  --bg: #000;
+  --surface: #101010;
+  --surface-raised: #1c1c1c;
+  --border: #fff;
+  --text: #fff;
+  --muted: #e0e0e0;
+  --accent: #5d49ff;
+  --mint: #69ffe5;
+}
+html[data-reduced-motion="true"] *,
+html[data-reduced-motion="true"] *::before,
+html[data-reduced-motion="true"] *::after {
+  scroll-behavior: auto !important;
+  animation-duration: .01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .01ms !important;
 }
 
 a { color: var(--mint); }
@@ -208,6 +228,20 @@ main:not(.dashboard) { width: min(100% - 40px, 900px); margin: 0 auto; padding: 
 .insights { margin: 6px 0 0; padding-left: 20px; display: grid; gap: 9px; }
 .insights li::marker { color: var(--mint); }
 .small { font-size: 12px; margin: 14px 0 0; }
+.settings-grid { display: grid; gap: 14px; }
+.settings-option { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 14px 0; border-bottom: 1px solid var(--border); }
+.settings-option:last-child { border-bottom: 0; }
+.settings-option label { font-weight: 650; }
+.settings-option p { margin: 3px 0 0; color: var(--muted); font-size: 13px; }
+.settings-option input[type="checkbox"] { width: 22px; height: 22px; accent-color: var(--accent); flex: 0 0 auto; }
+.delete-dialog { width: min(100% - 32px, 560px); max-height: min(90vh, 780px); overflow: auto; padding: 24px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 16px; }
+.delete-dialog::backdrop { background: rgb(0 0 0 / 75%); }
+.delete-dialog form { display: grid; gap: 14px; }
+.delete-dialog h2 { margin: 0; }
+.delete-dialog .danger-action { background: #a92738; }
+.delete-dialog .danger-action:disabled { opacity: .55; }
+.danger-note { color: var(--danger); }
+.settings-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 
 .segmented { display: inline-flex; padding: 3px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); }
 .segmented button { padding: 6px 12px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-weight: 600; }
